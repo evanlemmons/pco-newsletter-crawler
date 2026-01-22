@@ -1,0 +1,3 @@
+notion-client>=2.0.0
+crawl4ai>=0.4.0
+playwright>=1.40.0
