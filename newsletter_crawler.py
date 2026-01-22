@@ -46,6 +46,11 @@ logger = logging.getLogger(__name__)
 SOURCE_REGISTRY_DB = "43d593469bb8458c96ce927600514907"
 NEWSLETTER_PIPELINE_DB = "2efabbce69a280409309d052751eec14"
 
+# Data Source IDs (for the new Notion API 2025-09-03)
+# These are the collection IDs from your Notion databases
+SOURCE_REGISTRY_DS = "902cd405-8998-4dc8-8810-ae8f54e3f61a"
+NEWSLETTER_PIPELINE_DS = "2efabbce-69a2-8016-b362-000bfe5c9a11"
+
 # Category to Topic mapping
 CATEGORY_TO_TOPIC = {
     "Church Data/Research": "Church Tech",
@@ -80,6 +85,33 @@ def get_notion_client() -> Client:
         logger.error("NOTION_API_KEY environment variable not set")
         sys.exit(1)
     return Client(auth=api_key)
+
+
+def query_data_source(notion: Client, data_source_id: str, filter_query=None, start_cursor=None, page_size=None):
+    """
+    Query a Notion data source using the new API (2025-09-03).
+    Falls back to databases.query for older SDK versions.
+    """
+    kwargs = {"data_source_id": data_source_id}
+    if filter_query is not None:
+        kwargs["filter"] = filter_query
+    if start_cursor is not None:
+        kwargs["start_cursor"] = start_cursor
+    if page_size is not None:
+        kwargs["page_size"] = page_size
+    
+    # Try new API first (data_sources.query)
+    if hasattr(notion, "data_sources") and hasattr(notion.data_sources, "query"):
+        return notion.data_sources.query(**kwargs)
+    
+    # Fall back to old API (databases.query) for older SDK versions
+    if hasattr(notion, "databases") and hasattr(notion.databases, "query"):
+        # Old API uses database_id instead of data_source_id
+        kwargs["database_id"] = data_source_id
+        del kwargs["data_source_id"]
+        return notion.databases.query(**kwargs)
+    
+    raise RuntimeError("Notion SDK does not support data_sources.query or databases.query")
 
 # ============================================================================
 # FREQUENCY LOGIC
@@ -137,9 +169,10 @@ def query_active_sources(notion: Client, frequencies: list[str]) -> list[dict]:
     start_cursor = None
     
     while has_more:
-        response = notion.databases.query(
-            database_id=SOURCE_REGISTRY_DB,
-            filter=filter_query,
+        response = query_data_source(
+            notion,
+            SOURCE_REGISTRY_DS,
+            filter_query=filter_query,
             start_cursor=start_cursor
         )
         
@@ -189,9 +222,10 @@ def query_active_sources(notion: Client, frequencies: list[str]) -> list[dict]:
 
 def url_exists_in_pipeline(notion: Client, url: str) -> bool:
     """Check if a URL already exists in the Newsletter Pipeline."""
-    response = notion.databases.query(
-        database_id=NEWSLETTER_PIPELINE_DB,
-        filter={"property": "URL", "url": {"equals": url}},
+    response = query_data_source(
+        notion,
+        NEWSLETTER_PIPELINE_DS,
+        filter_query={"property": "URL", "url": {"equals": url}},
         page_size=1
     )
     return len(response["results"]) > 0
