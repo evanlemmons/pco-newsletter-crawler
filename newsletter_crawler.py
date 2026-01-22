@@ -78,6 +78,7 @@ except ImportError:
     logger.error("notion-client not installed. Run: pip install notion-client")
     sys.exit(1)
 
+
 def get_notion_client() -> Client:
     """Initialize Notion client with API key from environment."""
     api_key = os.environ.get("NOTION_API_KEY")
@@ -113,6 +114,7 @@ def query_data_source(notion: Client, data_source_id: str, filter_query=None, st
     
     raise RuntimeError("Notion SDK does not support data_sources.query or databases.query")
 
+
 # ============================================================================
 # FREQUENCY LOGIC
 # ============================================================================
@@ -142,6 +144,7 @@ def get_frequencies_for_today() -> list[str]:
         frequencies.append("Quarterly")
     
     return frequencies
+
 
 # ============================================================================
 # NOTION QUERIES
@@ -241,8 +244,40 @@ def create_pipeline_entry(
     source_page_id: str = None
 ) -> str:
     """Create a new entry in the Newsletter Pipeline. Returns page ID."""
+    
+    # Build topic multi-select
+    topic_value = [{"name": topic}] if topic else []
+    
+    # Truncate summary if too long (Notion limit is 2000 chars for rich_text)
+    if len(summary) > 1900:
+        summary = summary[:1900] + "..."
+    
+    properties = {
+        "Title": {"title": [{"text": {"content": title[:2000]}}]},  # Notion title limit
+        "URL": {"url": url},
+        "Source": {"select": {"name": "Web Crawl"}},
+        "Status": {"select": {"name": "Unreviewed"}},
+        "Date Found": {"date": {"start": date.today().isoformat()}},
+    }
+    
+    if topic_value:
+        properties["Topic"] = {"multi_select": topic_value}
+    
+    if summary:
+        properties["Summary"] = {"rich_text": [{"text": {"content": summary}}]}
+    
+    if source_page_id:
+        properties["Source Page"] = {"relation": [{"id": source_page_id}]}
+    
+    response = notion.pages.create(
+        parent={"database_id": NEWSLETTER_PIPELINE_DB},
+        properties=properties
+    )
+    
+    return response["id"]
 
-    def create_crawl_log(
+
+def create_crawl_log(
     notion: Client,
     results: list[dict],
     total_duration: float,
@@ -277,50 +312,19 @@ def create_pipeline_entry(
         lines.append("")
         lines.append(f"GitHub Action: {github_run_url}")
     
-    summary = "\n".join(lines)
+    summary_text = "\n".join(lines)
     
     # Truncate if needed
-    if len(summary) > 1900:
-        summary = summary[:1900] + "..."
+    if len(summary_text) > 1900:
+        summary_text = summary_text[:1900] + "..."
     
     properties = {
         "Title": {"title": [{"text": {"content": f"📋 Crawl Log - {today.strftime('%Y-%m-%d')}"}}]},
         "Status": {"select": {"name": "Crawl Log"}},
         "Source": {"select": {"name": "Web Crawl"}},
         "Date Found": {"date": {"start": today.isoformat()}},
-        "Summary": {"rich_text": [{"text": {"content": summary}}]},
+        "Summary": {"rich_text": [{"text": {"content": summary_text}}]},
     }
-    
-    response = notion.pages.create(
-        parent={"database_id": NEWSLETTER_PIPELINE_DB},
-        properties=properties
-    )
-    
-    return response["id"]
-    
-    # Build topic multi-select
-    topic_value = [{"name": topic}] if topic else []
-    
-    # Truncate summary if too long (Notion limit is 2000 chars for rich_text)
-    if len(summary) > 1900:
-        summary = summary[:1900] + "..."
-    
-    properties = {
-        "Title": {"title": [{"text": {"content": title[:2000]}}]},  # Notion title limit
-        "URL": {"url": url},
-        "Source": {"select": {"name": "Web Crawl"}},
-        "Status": {"select": {"name": "Unreviewed"}},
-        "Date Found": {"date": {"start": date.today().isoformat()}},
-    }
-    
-    if topic_value:
-        properties["Topic"] = {"multi_select": topic_value}
-    
-    if summary:
-        properties["Summary"] = {"rich_text": [{"text": {"content": summary}}]}
-
-    if source_page_id:
-        properties["Source Page"] = {"relation": [{"id": source_page_id}]}
     
     response = notion.pages.create(
         parent={"database_id": NEWSLETTER_PIPELINE_DB},
@@ -380,6 +384,7 @@ def update_source_status(
             }
     
     notion.pages.update(page_id=page_id, properties=properties)
+
 
 # ============================================================================
 # CRAWL4AI CRAWLER
@@ -466,7 +471,7 @@ def extract_date_from_content(markdown: str, url: str) -> Optional[str]:
     return None
 
 
-def extract_summary(markdown: str, max_length: int = 1000) -> str:
+def extract_summary(markdown: str, max_length: int = 600) -> str:
     """Extract a summary from markdown content."""
     if not markdown:
         return ""
@@ -611,6 +616,7 @@ async def crawl_source(
             "error": str(e)
         }
 
+
 # ============================================================================
 # MAIN ORCHESTRATION
 # ============================================================================
@@ -754,13 +760,14 @@ async def main(force_all: bool = False, dry_run: bool = False):
         logger.info(f"  {status} {result['source']}: {result['articles_created']} new articles")
         if result["error"]:
             logger.info(f"      Error: {result['error'][:100]}")
-
-# Create crawl log entry in Notion
+    
+    # Create crawl log entry in Notion
     if not dry_run and results:
         total_duration = sum(r.get("duration", 0) for r in results)
         github_run_url = os.environ.get("GITHUB_RUN_URL")
         create_crawl_log(notion, results, total_duration, github_run_url)
         logger.info("Crawl log created in Newsletter Pipeline")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Newsletter Pipeline Crawler")
