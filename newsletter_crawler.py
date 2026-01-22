@@ -237,7 +237,8 @@ def create_pipeline_entry(
     url: str,
     summary: str,
     topic: str,
-    source_name: str
+    source_name: str,
+    source_page_id: str = None
 ) -> str:
     """Create a new entry in the Newsletter Pipeline. Returns page ID."""
     
@@ -260,7 +261,10 @@ def create_pipeline_entry(
         properties["Topic"] = {"multi_select": topic_value}
     
     if summary:
-        properties["Notes"] = {"rich_text": [{"text": {"content": summary}}]}
+        properties["Summary"] = {"rich_text": [{"text": {"content": summary}}]}
+
+    if source_page_id:
+        properties["Source Page"] = {"relation": [{"id": source_page_id}]}
     
     response = notion.pages.create(
         parent={"database_id": NEWSLETTER_PIPELINE_DB},
@@ -406,7 +410,7 @@ def extract_date_from_content(markdown: str, url: str) -> Optional[str]:
     return None
 
 
-def extract_summary(markdown: str, max_length: int = 300) -> str:
+def extract_summary(markdown: str, max_length: int = 1000) -> str:
     """Extract a summary from markdown content."""
     if not markdown:
         return ""
@@ -600,7 +604,8 @@ async def process_source(notion: Client, source: dict) -> dict:
                 url=article["url"],
                 summary=article["summary"],
                 topic=topic,
-                source_name=source["name"]
+                source_name=source["name"],
+                source_page_id=source["page_id"]
             )
             articles_created += 1
             logger.info(f"  Created: {article['title'][:60]}...")
