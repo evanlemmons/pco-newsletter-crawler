@@ -471,7 +471,7 @@ def extract_date_from_content(markdown: str, url: str) -> Optional[str]:
     return None
 
 
-def extract_summary(markdown: str, max_length: int = 600) -> str:
+def extract_summary(markdown: str, max_length: int = 1000) -> str:
     """Extract a summary from markdown content."""
     if not markdown:
         return ""
