@@ -241,6 +241,62 @@ def create_pipeline_entry(
     source_page_id: str = None
 ) -> str:
     """Create a new entry in the Newsletter Pipeline. Returns page ID."""
+
+    def create_crawl_log(
+    notion: Client,
+    results: list[dict],
+    total_duration: float,
+    github_run_url: str = None
+) -> str:
+    """Create a crawl log entry summarizing the run."""
+    
+    today = date.today()
+    total_created = sum(r["articles_created"] for r in results)
+    successful = sum(1 for r in results if r["success"])
+    failed = len(results) - successful
+    
+    # Build summary
+    lines = [
+        f"Crawl completed: {today.strftime('%Y-%m-%d %H:%M')}",
+        f"Sources processed: {len(results)}",
+        f"Successful: {successful} | Failed: {failed}",
+        f"Total new articles: {total_created}",
+        f"Duration: {total_duration:.1f}s",
+        "",
+        "--- Results by Source ---"
+    ]
+    
+    for result in results:
+        status = "✓" if result["success"] else "✗"
+        line = f"{status} {result['source']}: {result['articles_created']} new"
+        if result.get("error"):
+            line += f" (Error: {result['error'][:50]}...)"
+        lines.append(line)
+    
+    if github_run_url:
+        lines.append("")
+        lines.append(f"GitHub Action: {github_run_url}")
+    
+    summary = "\n".join(lines)
+    
+    # Truncate if needed
+    if len(summary) > 1900:
+        summary = summary[:1900] + "..."
+    
+    properties = {
+        "Title": {"title": [{"text": {"content": f"📋 Crawl Log - {today.strftime('%Y-%m-%d')}"}}]},
+        "Status": {"select": {"name": "Crawl Log"}},
+        "Source": {"select": {"name": "Web Crawl"}},
+        "Date Found": {"date": {"start": today.isoformat()}},
+        "Summary": {"rich_text": [{"text": {"content": summary}}]},
+    }
+    
+    response = notion.pages.create(
+        parent={"database_id": NEWSLETTER_PIPELINE_DB},
+        properties=properties
+    )
+    
+    return response["id"]
     
     # Build topic multi-select
     topic_value = [{"name": topic}] if topic else []
@@ -699,6 +755,12 @@ async def main(force_all: bool = False, dry_run: bool = False):
         if result["error"]:
             logger.info(f"      Error: {result['error'][:100]}")
 
+# Create crawl log entry in Notion
+    if not dry_run and results:
+        total_duration = sum(r.get("duration", 0) for r in results)
+        github_run_url = os.environ.get("GITHUB_RUN_URL")
+        create_crawl_log(notion, results, total_duration, github_run_url)
+        logger.info("Crawl log created in Newsletter Pipeline")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Newsletter Pipeline Crawler")
