@@ -469,7 +469,9 @@ async def crawl_source(
         # Build filter chain
         filters = []
         if pattern and pattern.strip():
-            patterns = [p.strip() for p in pattern.split(',')]
+            # Auto-wrap each pattern with wildcards
+            raw_patterns = [p.strip() for p in pattern.split(',')]
+            patterns = [f"*{p}*" if not p.startswith('*') else p for p in raw_patterns]
             filters.append(URLPatternFilter(patterns=patterns))
         
         filter_chain = FilterChain(filters) if filters else None
