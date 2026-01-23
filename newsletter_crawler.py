@@ -78,6 +78,22 @@ except ImportError:
     logger.error("notion-client not installed. Run: pip install notion-client")
     sys.exit(1)
 
+try:
+    import anthropic
+    ANTHROPIC_AVAILABLE = True
+except ImportError:
+    ANTHROPIC_AVAILABLE = False
+    logger.warning("anthropic not installed. Summaries will use text extraction instead of AI.")
+
+
+def get_anthropic_client():
+    """Initialize Anthropic client with API key from environment."""
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        logger.warning("ANTHROPIC_API_KEY not set. Using text extraction for summaries.")
+        return None
+    return anthropic.Anthropic(api_key=api_key)
+
 
 def get_notion_client() -> Client:
     """Initialize Notion client with API key from environment."""
@@ -472,7 +488,7 @@ def extract_date_from_content(markdown: str, url: str) -> Optional[str]:
 
 
 def extract_summary(markdown: str, max_length: int = 1000) -> str:
-    """Extract a summary from markdown content."""
+    """Extract a summary from markdown content using basic text extraction."""
     if not markdown:
         return ""
     
@@ -486,6 +502,52 @@ def extract_summary(markdown: str, max_length: int = 1000) -> str:
         text = text[:max_length].rsplit(' ', 1)[0] + '...'
     
     return text
+
+
+def generate_ai_summary(anthropic_client, markdown: str, title: str, max_length: int = 1000) -> str:
+    """Generate an AI summary of the article using Claude."""
+    if not anthropic_client or not ANTHROPIC_AVAILABLE:
+        return extract_summary(markdown, max_length)
+    
+    if not markdown or len(markdown.strip()) < 100:
+        return extract_summary(markdown, max_length)
+    
+    # Truncate very long articles to save tokens
+    content_for_summary = markdown[:15000] if len(markdown) > 15000 else markdown
+    
+    try:
+        message = anthropic_client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=400,
+            messages=[
+                {
+                    "role": "user",
+                    "content": f"""Summarize this article for a newsletter curator. Provide a detailed analysis in under {max_length} characters that covers:
+- The main topic and key points
+- Why it matters or its implications
+- Any notable data, quotes, or insights
+
+Article title: {title}
+
+Article content:
+{content_for_summary}
+
+Write a concise but informative summary (under {max_length} characters):"""
+                }
+            ]
+        )
+        
+        summary = message.content[0].text.strip()
+        
+        # Ensure we don't exceed max length
+        if len(summary) > max_length:
+            summary = summary[:max_length].rsplit(' ', 1)[0] + '...'
+        
+        return summary
+        
+    except Exception as e:
+        logger.warning(f"AI summary failed, falling back to text extraction: {e}")
+        return extract_summary(markdown, max_length)
 
 
 def is_article_page(url: str, markdown: str) -> bool:
@@ -514,7 +576,8 @@ async def crawl_source(
     url: str,
     pattern: Optional[str] = None,
     max_pages: int = DEFAULT_MAX_PAGES,
-    max_depth: int = DEFAULT_MAX_DEPTH
+    max_depth: int = DEFAULT_MAX_DEPTH,
+    anthropic_client = None
 ) -> dict:
     """Crawl a source URL and return discovered articles."""
     
@@ -587,7 +650,9 @@ async def crawl_source(
                 
                 title = extract_title_from_markdown(markdown, result.url)
                 article_date = extract_date_from_content(markdown, result.url)
-                summary = extract_summary(markdown)
+                
+                # Use AI summary if available, otherwise fall back to text extraction
+                summary = generate_ai_summary(anthropic_client, markdown, title)
                 
                 articles.append({
                     "title": title,
@@ -621,7 +686,7 @@ async def crawl_source(
 # MAIN ORCHESTRATION
 # ============================================================================
 
-async def process_source(notion: Client, source: dict) -> dict:
+async def process_source(notion: Client, source: dict, anthropic_client=None) -> dict:
     """Process a single source: crawl, dedupe, create entries."""
     
     logger.info(f"Processing: {source['name']} ({source['url']})")
@@ -631,7 +696,8 @@ async def process_source(notion: Client, source: dict) -> dict:
         url=source["url"],
         pattern=source["crawl_pattern"],
         max_pages=source["max_pages"],
-        max_depth=source["max_depth"]
+        max_depth=source["max_depth"],
+        anthropic_client=anthropic_client
     )
     
     if not crawl_result["success"]:
@@ -702,8 +768,14 @@ async def main(force_all: bool = False, dry_run: bool = False):
         frequencies = get_frequencies_for_today()
         logger.info(f"Today's frequencies: {', '.join(frequencies)}")
     
-    # Initialize Notion client
+    # Initialize clients
     notion = get_notion_client()
+    anthropic_client = get_anthropic_client()
+    
+    if anthropic_client:
+        logger.info("AI summaries enabled (using Claude)")
+    else:
+        logger.info("AI summaries disabled (using text extraction)")
     
     # Query active sources
     sources = query_active_sources(notion, frequencies)
@@ -726,7 +798,7 @@ async def main(force_all: bool = False, dry_run: bool = False):
     # Process each source
     results = []
     for source in sources:
-        result = await process_source(notion, source)
+        result = await process_source(notion, source, anthropic_client)
         results.append(result)
         
         # Update source status in Notion
