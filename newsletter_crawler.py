@@ -527,12 +527,14 @@ def generate_ai_summary(anthropic_client, markdown: str, title: str, max_length:
 - Why it matters or its implications
 - Any notable data, quotes, or insights
 
+IMPORTANT: Return plain text only. Do not use any markdown formatting like **bold**, *italics*, bullet points, or headers. Write in flowing paragraphs.
+
 Article title: {title}
 
 Article content:
 {content_for_summary}
 
-Write a concise but informative summary (under {max_length} characters):"""
+Write a concise but informative plain text summary (under {max_length} characters):"""
                 }
             ]
         )
