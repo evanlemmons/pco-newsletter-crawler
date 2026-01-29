@@ -669,6 +669,15 @@ async def crawl_source(
                         logger.info(f"  [DEBUG]   Skipping - crawl not successful")
                     continue
 
+                # Skip the root/index page - only process subpages as articles
+                # Normalize URLs by removing trailing slashes for comparison
+                result_url_normalized = result.url.rstrip('/')
+                start_url_normalized = url.rstrip('/')
+                if result_url_normalized == start_url_normalized:
+                    if debug:
+                        logger.info(f"  [DEBUG]   Skipping - root/index page (not an article)")
+                    continue
+
                 markdown = ""
                 if hasattr(result, 'markdown'):
                     if hasattr(result.markdown, 'fit_markdown'):
