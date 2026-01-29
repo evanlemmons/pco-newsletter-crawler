@@ -579,10 +579,11 @@ async def crawl_source(
     pattern: Optional[str] = None,
     max_pages: int = DEFAULT_MAX_PAGES,
     max_depth: int = DEFAULT_MAX_DEPTH,
-    anthropic_client = None
+    anthropic_client = None,
+    debug: bool = False
 ) -> dict:
     """Crawl a source URL and return discovered articles."""
-    
+
     if not CRAWL4AI_AVAILABLE:
         return {
             "success": False,
@@ -590,11 +591,12 @@ async def crawl_source(
             "pages_crawled": 0,
             "error": "Crawl4AI not installed"
         }
-    
+
     start_time = time.time()
     articles = []
     pages_crawled = 0
-    
+    debug_info = {"links_found": [], "links_filtered": [], "patterns_used": []}
+
     try:
         # Build filter chain
         filters = []
@@ -603,21 +605,30 @@ async def crawl_source(
             raw_patterns = [p.strip() for p in pattern.split(',')]
             patterns = [f"*{p}*" if not p.startswith('*') else p for p in raw_patterns]
             filters.append(URLPatternFilter(patterns=patterns))
-        
+            debug_info["patterns_used"] = patterns
+            if debug:
+                logger.info(f"  [DEBUG] URL filter patterns: {patterns}")
+        else:
+            if debug:
+                logger.info(f"  [DEBUG] No URL filter pattern specified - will follow all internal links")
+
         filter_chain = FilterChain(filters) if filters else None
-        
+
         deep_crawl_strategy = BFSDeepCrawlStrategy(
             max_depth=max_depth,
             max_pages=max_pages,
             include_external=False,
             filter_chain=filter_chain
         )
-        
+
+        if debug:
+            logger.info(f"  [DEBUG] Deep crawl config: max_depth={max_depth}, max_pages={max_pages}")
+
         browser_config = BrowserConfig(
             headless=True,
-            verbose=False
+            verbose=debug  # Enable verbose mode when debugging
         )
-        
+
         crawler_config = CrawlerRunConfig(
             deep_crawl_strategy=deep_crawl_strategy,
             markdown_generator=DefaultMarkdownGenerator(
@@ -630,57 +641,90 @@ async def crawl_source(
         
         async with AsyncWebCrawler(config=browser_config) as crawler:
             results = await crawler.arun(url, config=crawler_config)
-            
+
             if not isinstance(results, list):
                 results = [results]
-            
+
+            if debug:
+                logger.info(f"  [DEBUG] Crawl returned {len(results)} result(s)")
+
             for result in results:
                 pages_crawled += 1
-                
+
+                if debug:
+                    logger.info(f"  [DEBUG] Result {pages_crawled}: {result.url} (success={result.success})")
+                    # Log discovered links if available
+                    if hasattr(result, 'links'):
+                        internal_links = result.links.get('internal', []) if isinstance(result.links, dict) else []
+                        logger.info(f"  [DEBUG]   Internal links found: {len(internal_links)}")
+                        for link in internal_links[:10]:  # Show first 10 links
+                            link_url = link.get('href', link) if isinstance(link, dict) else link
+                            logger.info(f"  [DEBUG]     - {link_url}")
+                        if len(internal_links) > 10:
+                            logger.info(f"  [DEBUG]     ... and {len(internal_links) - 10} more")
+                        debug_info["links_found"].extend(internal_links[:20])
+
                 if not result.success:
+                    if debug:
+                        logger.info(f"  [DEBUG]   Skipping - crawl not successful")
                     continue
-                
+
                 markdown = ""
                 if hasattr(result, 'markdown'):
                     if hasattr(result.markdown, 'fit_markdown'):
                         markdown = result.markdown.fit_markdown or result.markdown.raw_markdown or ""
                     elif isinstance(result.markdown, str):
                         markdown = result.markdown
-                
+
+                if debug:
+                    logger.info(f"  [DEBUG]   Markdown length: {len(markdown)} chars")
+
                 if not is_article_page(result.url, markdown):
+                    if debug:
+                        logger.info(f"  [DEBUG]   Skipping - not an article page")
                     continue
-                
+
                 title = extract_title_from_markdown(markdown, result.url)
                 article_date = extract_date_from_content(markdown, result.url)
-                
+
                 # Use AI summary if available, otherwise fall back to text extraction
                 summary = generate_ai_summary(anthropic_client, markdown, title)
-                
+
                 articles.append({
                     "title": title,
                     "url": result.url,
                     "date": article_date,
                     "summary": summary,
                 })
+
+                if debug:
+                    logger.info(f"  [DEBUG]   Added article: {title[:50]}...")
         
         duration = time.time() - start_time
-        
+
+        if debug:
+            logger.info(f"  [DEBUG] Crawl complete: {pages_crawled} pages, {len(articles)} articles in {duration:.1f}s")
+
         return {
             "success": True,
             "articles": articles,
             "pages_crawled": pages_crawled,
             "duration": duration,
-            "error": None
+            "error": None,
+            "debug_info": debug_info if debug else None
         }
-        
+
     except Exception as e:
         duration = time.time() - start_time
+        if debug:
+            logger.error(f"  [DEBUG] Crawl error: {str(e)}")
         return {
             "success": False,
             "articles": articles,
             "pages_crawled": pages_crawled,
             "duration": duration,
-            "error": str(e)
+            "error": str(e),
+            "debug_info": debug_info if debug else None
         }
 
 
@@ -688,18 +732,22 @@ async def crawl_source(
 # MAIN ORCHESTRATION
 # ============================================================================
 
-async def process_source(notion: Client, source: dict, anthropic_client=None) -> dict:
+async def process_source(notion: Client, source: dict, anthropic_client=None, debug: bool = False) -> dict:
     """Process a single source: crawl, dedupe, create entries."""
-    
+
     logger.info(f"Processing: {source['name']} ({source['url']})")
-    
+
+    if debug:
+        logger.info(f"  [DEBUG] Source config: pattern='{source['crawl_pattern']}', max_pages={source['max_pages']}, max_depth={source['max_depth']}")
+
     # Crawl the source
     crawl_result = await crawl_source(
         url=source["url"],
         pattern=source["crawl_pattern"],
         max_pages=source["max_pages"],
         max_depth=source["max_depth"],
-        anthropic_client=anthropic_client
+        anthropic_client=anthropic_client,
+        debug=debug
     )
     
     if not crawl_result["success"]:
@@ -755,38 +803,57 @@ async def process_source(notion: Client, source: dict, anthropic_client=None) ->
     }
 
 
-async def main(force_all: bool = False, dry_run: bool = False):
+async def main(force_all: bool = False, dry_run: bool = False, debug: bool = False, single_source: str = None, category_filter: str = None):
     """Main entry point."""
-    
+
     logger.info("=" * 60)
     logger.info("Newsletter Crawler Starting")
     logger.info("=" * 60)
-    
+
+    if debug:
+        logger.info("DEBUG MODE ENABLED - verbose logging active")
+
     # Determine which frequencies to process
-    if force_all:
+    if force_all or single_source or category_filter:
         frequencies = ["Daily", "Weekly", "Monthly", "Quarterly"]
-        logger.info("Force mode: processing ALL frequencies")
+        if single_source:
+            logger.info(f"Single source mode: looking for '{single_source}'")
+        elif category_filter:
+            logger.info(f"Category filter mode: processing '{category_filter}' sources")
+        else:
+            logger.info("Force mode: processing ALL frequencies")
     else:
         frequencies = get_frequencies_for_today()
         logger.info(f"Today's frequencies: {', '.join(frequencies)}")
-    
+
     # Initialize clients
     notion = get_notion_client()
     anthropic_client = get_anthropic_client()
-    
+
     if anthropic_client:
         logger.info("AI summaries enabled (using Claude)")
     else:
         logger.info("AI summaries disabled (using text extraction)")
-    
+
     # Query active sources
     sources = query_active_sources(notion, frequencies)
+
+    # Filter by single source name if specified
+    if single_source:
+        sources = [s for s in sources if single_source.lower() in s['name'].lower()]
+        logger.info(f"Filtered to {len(sources)} source(s) matching '{single_source}'")
+
+    # Filter by category if specified
+    if category_filter:
+        sources = [s for s in sources if s.get('category', '').lower() == category_filter.lower()]
+        logger.info(f"Filtered to {len(sources)} source(s) in category '{category_filter}'")
+
     logger.info(f"Found {len(sources)} active sources to process")
-    
+
     if not sources:
         logger.info("No sources to process. Exiting.")
         return
-    
+
     if dry_run:
         logger.info("\n--- DRY RUN MODE ---")
         for source in sources:
@@ -795,12 +862,13 @@ async def main(force_all: bool = False, dry_run: bool = False):
             logger.info(f"  Pattern: {source['crawl_pattern'] or '(none)'}")
             logger.info(f"  Max pages: {source['max_pages']}, Max depth: {source['max_depth']}")
             logger.info(f"  Frequency: {source['check_frequency']}")
+            logger.info(f"  Category: {source.get('category', '(none)')}")
         return
-    
+
     # Process each source
     results = []
     for source in sources:
-        result = await process_source(notion, source, anthropic_client)
+        result = await process_source(notion, source, anthropic_client, debug=debug)
         results.append(result)
         
         # Update source status in Notion
@@ -845,11 +913,23 @@ async def main(force_all: bool = False, dry_run: bool = False):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Newsletter Pipeline Crawler")
-    parser.add_argument("--force-all", action="store_true", 
+    parser.add_argument("--force-all", action="store_true",
                         help="Crawl all active sources regardless of frequency")
     parser.add_argument("--dry-run", action="store_true",
                         help="Show what would be crawled without doing it")
-    
+    parser.add_argument("--debug", action="store_true",
+                        help="Enable verbose debug logging for link discovery")
+    parser.add_argument("--source", type=str, default=None,
+                        help="Crawl only sources matching this name (partial match)")
+    parser.add_argument("--category", type=str, default=None,
+                        help="Crawl only sources in this category (e.g., 'Competitor')")
+
     args = parser.parse_args()
-    
-    asyncio.run(main(force_all=args.force_all, dry_run=args.dry_run))
+
+    asyncio.run(main(
+        force_all=args.force_all,
+        dry_run=args.dry_run,
+        debug=args.debug,
+        single_source=args.source,
+        category_filter=args.category
+    ))
