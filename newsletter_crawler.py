@@ -68,14 +68,6 @@ DEFAULT_MAX_PAGES = 5
 DEFAULT_MAX_DEPTH = 2
 MAX_CONSECUTIVE_FAILURES = 3
 
-# Conference-specific crawl patterns - pages likely to contain session/speaker info
-CONFERENCE_URL_PATTERNS = [
-    "*speaker*", "*session*", "*schedule*", "*agenda*",
-    "*workshop*", "*breakout*", "*track*", "*program*",
-    "*lineup*", "*keynote*", "*seminar*", "*class*",
-    "*course*", "*training*", "*summit*", "*2025*", "*2026*"
-]
-
 # ============================================================================
 # NOTION CLIENT
 # ============================================================================
@@ -512,109 +504,6 @@ def extract_summary(markdown: str, max_length: int = 1000) -> str:
     return text
 
 
-def is_conference_source(category: str) -> bool:
-    """Check if this source is a conference (needs special handling)."""
-    return category and category.lower() == "church conferences"
-
-
-def generate_conference_summary(anthropic_client, markdown: str, url: str, max_length: int = 1500) -> str:
-    """
-    Generate a summary specifically for conference content.
-    Extracts themes, session titles, workshops, speakers, and insights
-    into what church leaders are being taught.
-    """
-    if not anthropic_client or not ANTHROPIC_AVAILABLE:
-        return extract_summary(markdown, max_length)
-
-    if not markdown or len(markdown.strip()) < 50:
-        return ""
-
-    # Use more content for conference pages since they're dense with info
-    content_for_summary = markdown[:20000] if len(markdown) > 20000 else markdown
-
-    try:
-        message = anthropic_client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=600,
-            messages=[
-                {
-                    "role": "user",
-                    "content": f"""Analyze this church conference page and extract information about what is being taught to church leaders.
-
-Look for and summarize:
-- Conference themes or main topics
-- Session titles, workshop names, breakout sessions
-- Speaker names and their session topics
-- Training tracks or learning paths
-- Any courses, classes, or seminars offered
-- Key topics or focus areas being addressed
-
-If this page doesn't contain conference session/content information (e.g., it's just a registration page, about page, or marketing page), respond with "NO_CONFERENCE_CONTENT".
-
-IMPORTANT: Return plain text only. Do not use markdown formatting. Focus on the educational/teaching content.
-
-URL: {url}
-
-Page content:
-{content_for_summary}
-
-Extract conference session information (under {max_length} characters):"""
-                }
-            ]
-        )
-
-        summary = message.content[0].text.strip()
-
-        # Check if this page had no useful content
-        if "NO_CONFERENCE_CONTENT" in summary.upper():
-            return ""
-
-        if len(summary) > max_length:
-            summary = summary[:max_length].rsplit(' ', 1)[0] + '...'
-
-        return summary
-
-    except Exception as e:
-        logger.warning(f"Conference AI summary failed: {e}")
-        return extract_summary(markdown, max_length)
-
-
-def is_conference_content_page(url: str, markdown: str) -> bool:
-    """
-    Determine if a conference page contains session/speaker/content info.
-    More permissive than is_article_page since conference content varies.
-    """
-    # Skip obvious non-content pages
-    skip_patterns = [
-        r'/cart', r'/checkout', r'/account', r'/login', r'/register',
-        r'/privacy', r'/terms', r'/legal', r'/cookie',
-        r'/donate', r'/give', r'/payment'
-    ]
-
-    url_lower = url.lower()
-    for pattern in skip_patterns:
-        if re.search(pattern, url_lower):
-            return False
-
-    # Look for conference-related keywords in URL
-    content_keywords = [
-        'speaker', 'session', 'schedule', 'agenda', 'workshop',
-        'breakout', 'track', 'program', 'keynote', 'seminar',
-        'class', 'course', 'training', 'lineup', 'topic'
-    ]
-
-    has_content_url = any(kw in url_lower for kw in content_keywords)
-
-    # Check content length - conference pages should have some substance
-    if markdown:
-        word_count = len(markdown.split())
-        has_content = word_count >= 50  # Lower threshold than articles
-    else:
-        has_content = False
-
-    return has_content_url or has_content
-
-
 def generate_ai_summary(anthropic_client, markdown: str, title: str, max_length: int = 1000) -> str:
     """Generate an AI summary of the article using Claude."""
     if not anthropic_client or not ANTHROPIC_AVAILABLE:
@@ -848,155 +737,6 @@ async def crawl_source(
         }
 
 
-async def crawl_conference_source(
-    url: str,
-    max_pages: int = 15,  # Higher default for conferences
-    max_depth: int = 3,   # Deeper crawl for conferences
-    anthropic_client = None,
-    debug: bool = False
-) -> dict:
-    """
-    Crawl a conference website looking for session/speaker/content information.
-    Uses conference-specific URL patterns and content extraction.
-    """
-
-    if not CRAWL4AI_AVAILABLE:
-        return {
-            "success": False,
-            "articles": [],
-            "pages_crawled": 0,
-            "error": "Crawl4AI not installed"
-        }
-
-    start_time = time.time()
-    articles = []
-    pages_crawled = 0
-    debug_info = {"links_found": [], "patterns_used": CONFERENCE_URL_PATTERNS}
-
-    try:
-        if debug:
-            logger.info(f"  [DEBUG] Conference crawl mode - patterns: {CONFERENCE_URL_PATTERNS[:5]}...")
-
-        # Use conference-specific URL patterns
-        filter_chain = FilterChain([
-            URLPatternFilter(patterns=CONFERENCE_URL_PATTERNS)
-        ])
-
-        deep_crawl_strategy = BFSDeepCrawlStrategy(
-            max_depth=max_depth,
-            max_pages=max_pages,
-            include_external=False,
-            filter_chain=filter_chain
-        )
-
-        browser_config = BrowserConfig(
-            headless=True,
-            verbose=debug
-        )
-
-        crawler_config = CrawlerRunConfig(
-            deep_crawl_strategy=deep_crawl_strategy,
-            markdown_generator=DefaultMarkdownGenerator(
-                content_filter=PruningContentFilter(threshold=0.3)  # Lower threshold for conferences
-            ),
-            excluded_tags=['nav', 'footer', 'aside'],
-            remove_overlay_elements=True,
-            process_iframes=False
-        )
-
-        async with AsyncWebCrawler(config=browser_config) as crawler:
-            results = await crawler.arun(url, config=crawler_config)
-
-            if not isinstance(results, list):
-                results = [results]
-
-            if debug:
-                logger.info(f"  [DEBUG] Conference crawl returned {len(results)} result(s)")
-
-            for result in results:
-                pages_crawled += 1
-
-                if debug:
-                    logger.info(f"  [DEBUG] Result {pages_crawled}: {result.url} (success={result.success})")
-
-                if not result.success:
-                    continue
-
-                # Skip root page
-                result_url_normalized = result.url.rstrip('/')
-                start_url_normalized = url.rstrip('/')
-                if result_url_normalized == start_url_normalized:
-                    if debug:
-                        logger.info(f"  [DEBUG]   Skipping - root page")
-                    continue
-
-                markdown = ""
-                if hasattr(result, 'markdown'):
-                    if hasattr(result.markdown, 'fit_markdown'):
-                        markdown = result.markdown.fit_markdown or result.markdown.raw_markdown or ""
-                    elif isinstance(result.markdown, str):
-                        markdown = result.markdown
-
-                if debug:
-                    logger.info(f"  [DEBUG]   Markdown length: {len(markdown)} chars")
-
-                if not is_conference_content_page(result.url, markdown):
-                    if debug:
-                        logger.info(f"  [DEBUG]   Skipping - not a conference content page")
-                    continue
-
-                # Use conference-specific summary extraction
-                summary = generate_conference_summary(anthropic_client, markdown, result.url)
-
-                # Skip if no useful conference content was found
-                if not summary:
-                    if debug:
-                        logger.info(f"  [DEBUG]   Skipping - no conference content extracted")
-                    continue
-
-                # Generate a title from the URL or first heading
-                title = extract_title_from_markdown(markdown, result.url)
-                # Prefix with conference indicator
-                title = f"📅 {title}"
-
-                articles.append({
-                    "title": title,
-                    "url": result.url,
-                    "date": None,  # Conferences don't have article dates
-                    "summary": summary,
-                })
-
-                if debug:
-                    logger.info(f"  [DEBUG]   Added conference content: {title[:50]}...")
-
-        duration = time.time() - start_time
-
-        if debug:
-            logger.info(f"  [DEBUG] Conference crawl complete: {pages_crawled} pages, {len(articles)} content items in {duration:.1f}s")
-
-        return {
-            "success": True,
-            "articles": articles,
-            "pages_crawled": pages_crawled,
-            "duration": duration,
-            "error": None,
-            "debug_info": debug_info if debug else None
-        }
-
-    except Exception as e:
-        duration = time.time() - start_time
-        if debug:
-            logger.error(f"  [DEBUG] Conference crawl error: {str(e)}")
-        return {
-            "success": False,
-            "articles": articles,
-            "pages_crawled": pages_crawled,
-            "duration": duration,
-            "error": str(e),
-            "debug_info": debug_info if debug else None
-        }
-
-
 # ============================================================================
 # MAIN ORCHESTRATION
 # ============================================================================
@@ -1006,34 +746,19 @@ async def process_source(notion: Client, source: dict, anthropic_client=None, de
 
     logger.info(f"Processing: {source['name']} ({source['url']})")
 
-    # Check if this is a conference source (needs special handling)
-    is_conference = is_conference_source(source.get("category", ""))
-
     if debug:
         logger.info(f"  [DEBUG] Source config: pattern='{source['crawl_pattern']}', max_pages={source['max_pages']}, max_depth={source['max_depth']}")
-        if is_conference:
-            logger.info(f"  [DEBUG] Conference source detected - using conference crawl strategy")
 
-    # Use appropriate crawling strategy
-    if is_conference:
-        crawl_result = await crawl_conference_source(
-            url=source["url"],
-            max_pages=source["max_pages"] or 15,  # Higher default for conferences
-            max_depth=source["max_depth"] or 3,   # Deeper for conferences
-            anthropic_client=anthropic_client,
-            debug=debug
-        )
-    else:
-        # Standard blog/article crawl
-        crawl_result = await crawl_source(
-            url=source["url"],
-            pattern=source["crawl_pattern"],
-            max_pages=source["max_pages"],
-            max_depth=source["max_depth"],
-            anthropic_client=anthropic_client,
-            debug=debug
-        )
-    
+    # Crawl the source
+    crawl_result = await crawl_source(
+        url=source["url"],
+        pattern=source["crawl_pattern"],
+        max_pages=source["max_pages"],
+        max_depth=source["max_depth"],
+        anthropic_client=anthropic_client,
+        debug=debug
+    )
+
     if not crawl_result["success"]:
         logger.warning(f"  Crawl failed: {crawl_result['error']}")
         return {
@@ -1046,8 +771,7 @@ async def process_source(notion: Client, source: dict, anthropic_client=None, de
             "error": crawl_result["error"]
         }
 
-    content_type = "conference items" if is_conference else "potential articles"
-    logger.info(f"  Crawled {crawl_result['pages_crawled']} pages, found {len(crawl_result['articles'])} {content_type}")
+    logger.info(f"  Crawled {crawl_result['pages_crawled']} pages, found {len(crawl_result['articles'])} potential articles")
     
     # Dedupe and create entries
     articles_created = 0
