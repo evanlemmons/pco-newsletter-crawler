@@ -559,24 +559,17 @@ Write a concise but informative plain text summary (under {max_length} character
 
 
 def is_article_page(url: str, markdown: str) -> bool:
-    """Determine if a page is likely an article vs. index/navigation page."""
-    skip_patterns = [
-        r'/tag/', r'/category/', r'/author/', r'/page/\d+',
-        r'/archive', r'/search', r'/about', r'/contact',
-        r'/privacy', r'/terms', r'/login', r'/register',
-        r'/cart', r'/checkout', r'/account'
-    ]
-    
-    url_lower = url.lower()
-    for pattern in skip_patterns:
-        if re.search(pattern, url_lower):
-            return False
-    
+    """
+    Determine if a page has enough content to be worth summarizing.
+
+    URL filtering is handled by the crawl pattern in Notion, so we only
+    check for minimum content length here.
+    """
     if markdown:
         word_count = len(markdown.split())
         if word_count < 100:
             return False
-    
+
     return True
 
 
