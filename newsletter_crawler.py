@@ -488,20 +488,26 @@ def extract_date_from_content(markdown: str, url: str) -> Optional[str]:
 
 
 def extract_summary(markdown: str, max_length: int = 1000) -> str:
-    """Extract a summary from markdown content using basic text extraction."""
+    """
+    Fallback summary extraction when AI is unavailable.
+    Strips markdown and truncates. Prefixes with indicator so it's clear this isn't an AI summary.
+    """
     if not markdown:
         return ""
-    
+
     text = re.sub(r'^#+\s+.*$', '', markdown, flags=re.MULTILINE)
     text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)
     text = re.sub(r'[*_`]', '', text)
     text = re.sub(r'\n+', ' ', text)
     text = re.sub(r'\s+', ' ', text).strip()
-    
-    if len(text) > max_length:
-        text = text[:max_length].rsplit(' ', 1)[0] + '...'
-    
-    return text
+
+    # Leave room for prefix
+    content_max = max_length - 25
+    if len(text) > content_max:
+        text = text[:content_max].rsplit(' ', 1)[0] + '...'
+
+    # Prefix so it's clear this isn't an AI summary
+    return f"[Auto-extracted] {text}"
 
 
 def generate_ai_summary(anthropic_client, markdown: str, title: str, max_length: int = 1000) -> str:
@@ -780,7 +786,7 @@ async def process_source(notion: Client, source: dict, anthropic_client=None, de
     for article in crawl_result["articles"]:
         # Check if URL already exists
         if url_exists_in_pipeline(notion, article["url"]):
-            logger.debug(f"  Skipping (exists): {article['url']}")
+            logger.info(f"  Skipping (exists): {article['url']}")
             continue
         
         # Create new entry
