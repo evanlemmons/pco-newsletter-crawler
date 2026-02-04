@@ -252,6 +252,26 @@ def build_article_digest(articles: list[dict], max_chars_per_article: int = 300)
 
 MONTHLY_SUMMARY_PROMPT = """You are a strategic analyst for Planning Center, a company that builds church management software used by thousands of churches. Your task is to write a monthly trend report based on articles from our industry monitoring. This should read like a polished internal newsletter for our product team.
 
+FIRST, OUTPUT A CLICKBAIT HEADLINE:
+Before the main report, output a single catchy, clickbait-style, semi-humorous one-liner that captures the month's most interesting theme or finding. This will be used as a teaser summary.
+
+Format it exactly like this on its own line:
+HEADLINE: [Your snappy one-liner here]
+
+Examples of good headlines:
+- HEADLINE: AI is coming for your church bulletin, and pastors are surprisingly okay with it
+- HEADLINE: Three ChMS vendors walk into a merger, only two walk out
+- HEADLINE: Turns out churches DO want online giving—who knew?
+- HEADLINE: The great volunteer shortage of 2026 is real, and it's spectacular
+
+The headline should be:
+- One sentence, under 100 characters ideally
+- Slightly irreverent but still professional
+- Reference a specific finding from this month's articles
+- Make someone want to read more
+
+After the headline, continue with the full report below.
+
 CONTEXT:
 - Planning Center builds tools for church operations: check-in, giving, groups, people management, services planning
 - Our users are church administrators, pastors, and volunteers
@@ -328,12 +348,16 @@ def generate_monthly_summary(
     article_digest: str,
     period_description: str,
     article_count: int
-) -> str:
+) -> tuple[str, str]:
     """
     Generate strategic trend analysis using Claude Sonnet.
 
-    Returns markdown-formatted analysis for Notion page body.
+    Returns tuple of (headline, body) where:
+    - headline: Clickbait-style one-liner for the Summary property
+    - body: Full markdown-formatted analysis for Notion page body
     """
+    import re
+
     prompt = MONTHLY_SUMMARY_PROMPT.format(
         period_description=period_description,
         article_count=article_count,
@@ -352,8 +376,24 @@ def generate_monthly_summary(
             ]
         )
 
-        summary = message.content[0].text.strip()
-        return summary
+        full_response = message.content[0].text.strip()
+
+        # Parse out the headline
+        headline = ""
+        body = full_response
+
+        # Look for HEADLINE: pattern at the start
+        headline_match = re.match(r'^HEADLINE:\s*(.+?)(?:\n|$)', full_response, re.IGNORECASE)
+        if headline_match:
+            headline = headline_match.group(1).strip()
+            # Remove the headline line from the body
+            body = full_response[headline_match.end():].strip()
+            logger.info(f"Extracted headline: {headline}")
+        else:
+            logger.warning("No HEADLINE found in response, using default")
+            headline = f"What happened in {period_description}"
+
+        return headline, body
 
     except Exception as e:
         logger.error(f"Failed to generate summary: {e}")
@@ -516,12 +556,13 @@ def parse_inline_markdown(text: str) -> list[dict]:
 def create_summary_entry(
     notion: Client,
     summary_text: str,
+    headline: str,
     month_name: str,
     article_count: int
 ) -> str:
     """
     Create Monthly Summary entry in Newsletter Pipeline.
-    Puts the full content in the page body, not the Summary property.
+    Puts the headline in Summary property and full content in page body.
 
     Returns page ID.
     """
@@ -534,6 +575,7 @@ def create_summary_entry(
         "Title": {"title": [{"text": {"content": title}}]},
         "Type": {"select": {"name": "Monthly Summary"}},
         "Date Found": {"date": {"start": date.today().isoformat()}},
+        "Summary": {"rich_text": [{"text": {"content": headline}}]},
     }
 
     response = notion.pages.create(
@@ -634,7 +676,7 @@ def main(days_back: int = None, dry_run: bool = False):
 
     # Generate summary with Claude
     logger.info("Generating trend analysis with Claude Sonnet...")
-    summary = generate_monthly_summary(
+    headline, summary = generate_monthly_summary(
         anthropic_client,
         article_digest,
         period_description,
@@ -642,6 +684,7 @@ def main(days_back: int = None, dry_run: bool = False):
     )
 
     logger.info("Summary generated successfully")
+    logger.info(f"Headline: {headline}")
     logger.info("-" * 40)
     print(summary)
     logger.info("-" * 40)
@@ -651,6 +694,7 @@ def main(days_back: int = None, dry_run: bool = False):
     page_id = create_summary_entry(
         notion,
         summary,
+        headline,
         month_name,
         len(articles)
     )
