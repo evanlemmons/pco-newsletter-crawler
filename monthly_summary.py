@@ -113,21 +113,19 @@ def query_data_source(notion: Client, data_source_id: str, filter_query=None, st
 
 def query_recent_articles(notion: Client, start_date: date, end_date: date) -> list[dict]:
     """
-    Query Newsletter Pipeline for articles in a date range.
-    Excludes Crawl Log and Monthly Summary entries.
+    Query Newsletter Pipeline for Article entries in a date range.
 
     Args:
         start_date: Inclusive start date
         end_date: Exclusive end date (articles before this date)
 
-    Returns list of dicts with: title, url, summary, topics, date_found, source
+    Returns list of dicts with: title, url, summary, topics, date_found, type
     """
     filter_query = {
         "and": [
             {"property": "Date Found", "date": {"on_or_after": start_date.isoformat()}},
             {"property": "Date Found", "date": {"before": end_date.isoformat()}},
-            {"property": "Status", "select": {"does_not_equal": "Crawl Log"}},
-            {"property": "Status", "select": {"does_not_equal": "Monthly Summary"}}
+            {"property": "Type", "select": {"equals": "Article"}}
         ]
     }
 
@@ -169,15 +167,10 @@ def query_recent_articles(notion: Client, start_date: date, end_date: date) -> l
             if props.get("Date Found", {}).get("date"):
                 date_found = props["Date Found"]["date"]["start"]
 
-            # Extract source
-            source = ""
-            if props.get("Source", {}).get("select"):
-                source = props["Source"]["select"]["name"]
-
-            # Extract status
-            status = ""
-            if props.get("Status", {}).get("select"):
-                status = props["Status"]["select"]["name"]
+            # Extract type
+            entry_type = ""
+            if props.get("Type", {}).get("select"):
+                entry_type = props["Type"]["select"]["name"]
 
             articles.append({
                 "title": title,
@@ -185,8 +178,7 @@ def query_recent_articles(notion: Client, start_date: date, end_date: date) -> l
                 "summary": summary,
                 "topics": topics,
                 "date_found": date_found,
-                "source": source,
-                "status": status,
+                "type": entry_type,
             })
 
         has_more = response.get("has_more", False)
@@ -540,7 +532,7 @@ def create_summary_entry(
 
     properties = {
         "Title": {"title": [{"text": {"content": title}}]},
-        "Status": {"select": {"name": "Monthly Summary"}},
+        "Type": {"select": {"name": "Monthly Summary"}},
         "Date Found": {"date": {"start": date.today().isoformat()}},
     }
 

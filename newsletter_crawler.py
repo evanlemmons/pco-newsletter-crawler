@@ -271,7 +271,7 @@ def create_pipeline_entry(
     properties = {
         "Title": {"title": [{"text": {"content": title[:2000]}}]},  # Notion title limit
         "URL": {"url": url},
-        "Status": {"select": {"name": "Unreviewed"}},
+        "Type": {"select": {"name": "Article"}},
         "Date Found": {"date": {"start": date.today().isoformat()}},
     }
     
@@ -358,7 +358,7 @@ def create_crawl_log(
 
     properties = {
         "Title": {"title": [{"text": {"content": f"Crawl Log - {today.strftime('%Y-%m-%d')}"}}]},
-        "Status": {"select": {"name": "Crawl Log"}},
+        "Type": {"select": {"name": "Crawl Log"}},
         "Date Found": {"date": {"start": today.isoformat()}},
         "Summary": {"rich_text": [{"text": {"content": f"Total new articles: {total_created}"}}]},
     }
