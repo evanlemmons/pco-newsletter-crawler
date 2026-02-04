@@ -287,9 +287,10 @@ def create_pipeline_entry(
     
     response = notion.pages.create(
         parent={"database_id": NEWSLETTER_PIPELINE_DB},
+        icon={"type": "emoji", "emoji": "📄"},
         properties=properties
     )
-    
+
     return response["id"]
 
 
@@ -335,15 +336,16 @@ def create_crawl_log(
         summary_text = summary_text[:1900] + "..."
     
     properties = {
-        "Title": {"title": [{"text": {"content": f"📋 Crawl Log - {today.strftime('%Y-%m-%d')}"}}]},
+        "Title": {"title": [{"text": {"content": f"Crawl Log - {today.strftime('%Y-%m-%d')}"}}]},
         "Status": {"select": {"name": "Crawl Log"}},
         "Source": {"select": {"name": "Web Crawl"}},
         "Date Found": {"date": {"start": today.isoformat()}},
         "Summary": {"rich_text": [{"text": {"content": summary_text}}]},
     }
-    
+
     response = notion.pages.create(
         parent={"database_id": NEWSLETTER_PIPELINE_DB},
+        icon={"type": "emoji", "emoji": "📋"},
         properties=properties
     )
     

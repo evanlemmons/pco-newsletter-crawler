@@ -547,6 +547,7 @@ def create_summary_entry(
 
     response = notion.pages.create(
         parent={"database_id": NEWSLETTER_PIPELINE_DB},
+        icon={"type": "emoji", "emoji": "📣"},
         properties=properties,
         children=content_blocks
     )
