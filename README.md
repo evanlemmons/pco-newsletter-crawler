@@ -7,21 +7,19 @@ Automated web crawler that monitors sources defined in Notion and populates a Ne
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                    GitHub Actions                            │
-│                    (runs daily at 6 AM)                      │
+│                    (runs weekly on Mondays at 6 AM UTC)      │
 └─────────────────────────────────────────────────────────────┘
                             │
                             ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                    newsletter_crawler.py                     │
 ├─────────────────────────────────────────────────────────────┤
-│  1. Check today's date                                       │
-│     → Daily sources: every day                               │
-│     → Weekly sources: Mondays                                │
-│     → Monthly sources: 1st of month                          │
-│     → Quarterly sources: Jan 1, Apr 1, Jul 1, Oct 1          │
+│  1. Query Notion Source Registry for active sources          │
+│     → All "Weekly" frequency sources run every Monday        │
+│     → "Monthly" sources run if 1st falls on Monday           │
+│     → "Quarterly" sources run if quarter start is Monday     │
 │                                                              │
-│  2. Query Notion Source Registry                             │
-│     → Get active sources matching today's frequencies        │
+│  2. For each matching source:                                │
 │                                                              │
 │  3. For each source:                                         │
 │     → Crawl website using Crawl4AI                           │
@@ -126,7 +124,7 @@ git push
 ### Step 7: Run for Real
 
 1. Same as above, but leave **Dry run** unchecked
-2. Or just wait for 6 AM UTC and it will run automatically
+2. Or wait for the next Monday at 6 AM UTC when it runs automatically
 
 ---
 
@@ -138,15 +136,16 @@ Edit `.github/workflows/newsletter-crawler.yml`:
 
 ```yaml
 schedule:
-  - cron: '0 6 * * *'  # 6 AM UTC daily
+  - cron: '0 6 * * 1'  # 6 AM UTC every Monday
 ```
 
-Cron format: `minute hour day month weekday`
+Cron format: `minute hour day month weekday` (0=Sunday, 1=Monday, etc.)
 
 Examples:
-- `'0 11 * * *'` = 11 AM UTC (6 AM EST)
-- `'0 14 * * *'` = 2 PM UTC (6 AM PST)
-- `'0 6,18 * * *'` = 6 AM and 6 PM UTC
+- `'0 6 * * 1'` = 6 AM UTC every Monday (current setting)
+- `'0 6 * * *'` = 6 AM UTC daily
+- `'0 11 * * 1'` = 11 AM UTC every Monday (6 AM EST)
+- `'0 6 * * 1,4'` = 6 AM UTC on Mondays and Thursdays
 
 ### Source Registry Fields
 
@@ -157,7 +156,7 @@ Configure these in Notion for each source:
 | Name | Yes | Source name for logging |
 | URL | Yes | Base URL to crawl |
 | Status | Yes | Must be "Active" to be crawled |
-| Check Frequency | Yes | Daily, Weekly, Monthly, or Quarterly |
+| Check Frequency | Yes | Weekly (recommended), Monthly, or Quarterly |
 | Category | No | Maps to Topic in Pipeline |
 | Crawl Pattern | No | URL filter, e.g., `*blog*,*news*` |
 | Max Pages | No | Limit pages per crawl (default: 20) |
@@ -165,12 +164,15 @@ Configure these in Notion for each source:
 
 ### Frequency Schedule
 
+The workflow runs **every Monday at 6 AM UTC**. Sources are included based on their frequency:
+
 | Frequency | When It Runs |
 |-----------|--------------|
-| Daily | Every day |
-| Weekly | Mondays |
-| Monthly | 1st of each month |
-| Quarterly | Jan 1, Apr 1, Jul 1, Oct 1 |
+| Weekly | Every Monday (recommended) |
+| Monthly | When the 1st of month falls on a Monday |
+| Quarterly | When Jan 1, Apr 1, Jul 1, or Oct 1 falls on Monday |
+
+> **Note**: Since the workflow only runs on Mondays, "Weekly" is the most reliable frequency setting.
 
 ---
 
