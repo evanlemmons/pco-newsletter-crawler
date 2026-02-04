@@ -6,10 +6,12 @@ This script:
 1. Queries the past 30 days of articles from Newsletter Pipeline
 2. Generates a strategic trend analysis using Claude Sonnet
 3. Creates a Monthly Summary entry in Notion
+4. Posts notification to Slack with headline and link
 
 Environment variables required:
 - NOTION_API_KEY: Your Notion integration token
 - ANTHROPIC_API_KEY: Your Anthropic API key
+- SLACK_WEBHOOK_URL: Slack incoming webhook for #product-managers-workroom (optional)
 
 Usage:
     python monthly_summary.py              # Normal run
@@ -18,9 +20,12 @@ Usage:
 """
 
 import argparse
+import json
 import os
 import sys
 import logging
+import urllib.request
+import urllib.error
 from datetime import datetime, date, timedelta
 from calendar import monthrange
 from collections import defaultdict
@@ -586,7 +591,95 @@ def create_summary_entry(
     )
 
     logger.info(f"Created Monthly Summary entry: {title}")
-    return response["id"]
+    return response["id"], response["url"]
+
+
+# ============================================================================
+# SLACK INTEGRATION
+# ============================================================================
+
+def post_to_slack(
+    headline: str,
+    month_name: str,
+    notion_url: str,
+    article_count: int
+) -> bool:
+    """
+    Post monthly summary notification to Slack.
+
+    Uses SLACK_WEBHOOK_URL environment variable.
+    Returns True if successful, False otherwise.
+    """
+    webhook_url = os.environ.get("SLACK_WEBHOOK_URL")
+    if not webhook_url:
+        logger.info("SLACK_WEBHOOK_URL not set, skipping Slack notification")
+        return False
+
+    # Build Slack Block Kit message
+    blocks = [
+        {
+            "type": "header",
+            "text": {
+                "type": "plain_text",
+                "text": f"📣 Monthly Summary - {month_name}",
+                "emoji": True
+            }
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*{headline}*"
+            }
+        },
+        {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": f"Based on {article_count} articles from the Newsletter Pipeline"
+                }
+            ]
+        },
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {
+                        "type": "plain_text",
+                        "text": "Read Full Summary",
+                        "emoji": True
+                    },
+                    "url": notion_url,
+                    "style": "primary"
+                }
+            ]
+        }
+    ]
+
+    payload = {
+        "blocks": blocks,
+        "text": f"Monthly Summary - {month_name}: {headline}"  # Fallback for notifications
+    }
+
+    try:
+        data = json.dumps(payload).encode('utf-8')
+        req = urllib.request.Request(
+            webhook_url,
+            data=data,
+            headers={'Content-Type': 'application/json'}
+        )
+        with urllib.request.urlopen(req) as response:
+            if response.status == 200:
+                logger.info("Posted to Slack successfully")
+                return True
+            else:
+                logger.warning(f"Slack returned status {response.status}")
+                return False
+    except urllib.error.URLError as e:
+        logger.error(f"Failed to post to Slack: {e}")
+        return False
 
 
 # ============================================================================
@@ -691,7 +784,7 @@ def main(days_back: int = None, dry_run: bool = False):
 
     # Create Notion entry
     logger.info("Creating Monthly Summary entry in Notion...")
-    page_id = create_summary_entry(
+    page_id, page_url = create_summary_entry(
         notion,
         summary,
         headline,
@@ -699,7 +792,17 @@ def main(days_back: int = None, dry_run: bool = False):
         len(articles)
     )
 
-    logger.info(f"Done! Page ID: {page_id}")
+    logger.info(f"Created Notion page: {page_id}")
+
+    # Post to Slack
+    post_to_slack(
+        headline=headline,
+        month_name=month_name,
+        notion_url=page_url,
+        article_count=len(articles)
+    )
+
+    logger.info("Done!")
 
 
 if __name__ == "__main__":
