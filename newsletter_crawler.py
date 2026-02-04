@@ -301,54 +301,77 @@ def create_crawl_log(
     github_run_url: str = None
 ) -> str:
     """Create a crawl log entry summarizing the run."""
-    
+
     today = date.today()
     total_created = sum(r["articles_created"] for r in results)
     successful = sum(1 for r in results if r["success"])
     failed = len(results) - successful
-    
-    # Build summary
-    lines = [
-        f"Crawl completed: {today.strftime('%Y-%m-%d %H:%M')}",
-        f"Sources processed: {len(results)}",
-        f"Successful: {successful} | Failed: {failed}",
-        f"Total new articles: {total_created}",
-        f"Duration: {total_duration:.1f}s",
-        "",
-        "--- Results by Source ---"
-    ]
-    
+
+    # Build page body content as Notion blocks
+    content_blocks = []
+
+    # Overview paragraph
+    overview = f"Crawl completed {today.strftime('%Y-%m-%d %H:%M')}. Processed {len(results)} sources ({successful} successful, {failed} failed) in {total_duration:.1f}s."
+    content_blocks.append({
+        "object": "block",
+        "type": "paragraph",
+        "paragraph": {
+            "rich_text": [{"type": "text", "text": {"content": overview}}]
+        }
+    })
+
+    # Results by Source header
+    content_blocks.append({
+        "object": "block",
+        "type": "heading_2",
+        "heading_2": {
+            "rich_text": [{"type": "text", "text": {"content": "Results by Source"}}]
+        }
+    })
+
+    # Each source as a bullet point
     for result in results:
         status = "✓" if result["success"] else "✗"
         line = f"{status} {result['source']}: {result['articles_created']} new"
         if result.get("error"):
             line += f" (Error: {result['error'][:50]}...)"
-        lines.append(line)
-    
+
+        content_blocks.append({
+            "object": "block",
+            "type": "bulleted_list_item",
+            "bulleted_list_item": {
+                "rich_text": [{"type": "text", "text": {"content": line}}]
+            }
+        })
+
+    # GitHub Action link if available
     if github_run_url:
-        lines.append("")
-        lines.append(f"GitHub Action: {github_run_url}")
-    
-    summary_text = "\n".join(lines)
-    
-    # Truncate if needed
-    if len(summary_text) > 1900:
-        summary_text = summary_text[:1900] + "..."
-    
+        content_blocks.append({
+            "object": "block",
+            "type": "paragraph",
+            "paragraph": {
+                "rich_text": [
+                    {"type": "text", "text": {"content": "GitHub Action: "}},
+                    {"type": "text", "text": {"content": github_run_url, "link": {"url": github_run_url}}}
+                ]
+            }
+        })
+
     properties = {
         "Title": {"title": [{"text": {"content": f"Crawl Log - {today.strftime('%Y-%m-%d')}"}}]},
         "Status": {"select": {"name": "Crawl Log"}},
         "Source": {"select": {"name": "Web Crawl"}},
         "Date Found": {"date": {"start": today.isoformat()}},
-        "Summary": {"rich_text": [{"text": {"content": summary_text}}]},
+        "Summary": {"rich_text": [{"text": {"content": f"Total new articles: {total_created}"}}]},
     }
 
     response = notion.pages.create(
         parent={"database_id": NEWSLETTER_PIPELINE_DB},
         icon={"type": "emoji", "emoji": "📋"},
-        properties=properties
+        properties=properties,
+        children=content_blocks
     )
-    
+
     return response["id"]
 
 
