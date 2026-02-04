@@ -11,7 +11,7 @@ This script:
 Environment variables required:
 - NOTION_API_KEY: Your Notion integration token
 - ANTHROPIC_API_KEY: Your Anthropic API key
-- SLACK_WEBHOOK_URL: Slack incoming webhook for #product-managers-workroom (optional)
+- SLACK_WEBHOOK_URL: Slack incoming webhook for #product-department (optional)
 
 Usage:
     python monthly_summary.py              # Normal run
