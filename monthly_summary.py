@@ -615,6 +615,12 @@ def post_to_slack(
         logger.info("SLACK_WEBHOOK_URL not set, skipping Slack notification")
         return False
 
+    # Add Planning Center workspace prefix to Notion URL
+    # API returns: https://www.notion.so/Page-Name-id
+    # We need: https://www.notion.so/planningcenter/Page-Name-id
+    if notion_url and "notion.so/" in notion_url and "/planningcenter/" not in notion_url:
+        notion_url = notion_url.replace("notion.so/", "notion.so/planningcenter/")
+
     # Build Slack Block Kit message
     blocks = [
         {
