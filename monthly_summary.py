@@ -541,7 +541,6 @@ def create_summary_entry(
     properties = {
         "Title": {"title": [{"text": {"content": title}}]},
         "Status": {"select": {"name": "Monthly Summary"}},
-        "Source": {"select": {"name": "Web Crawl"}},
         "Date Found": {"date": {"start": date.today().isoformat()}},
     }
 
