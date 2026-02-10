@@ -852,7 +852,6 @@ def create_theme_entry(
         "Date Found": {"date": {"start": date.today().isoformat()}},
         "Summary": {"rich_text": [{"text": {"content": summary}}]},
         "Source Page": {"relation": [{"id": source_page_id}]},
-        "Status": {"select": {"name": "Unreviewed"}},
     }
 
     # Use first high-impact URL if available, otherwise fall back to any source URL
