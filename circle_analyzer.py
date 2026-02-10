@@ -27,7 +27,7 @@ import os
 import sys
 import logging
 import time
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 from typing import Optional
 from collections import defaultdict
 
@@ -927,8 +927,8 @@ def main(days_back: int = DEFAULT_DAYS_BACK, dry_run: bool = False, debug: bool 
 
     start_time = time.time()
 
-    # Calculate since_date
-    since_date = datetime.now() - timedelta(days=days_back)
+    # Calculate since_date (timezone-aware for comparison with Circle API timestamps)
+    since_date = datetime.now(timezone.utc) - timedelta(days=days_back)
     logger.info(f"Analyzing content from past {days_back} days (since {since_date.strftime('%Y-%m-%d')})")
 
     # Initialize clients
