@@ -270,7 +270,7 @@ def fetch_space_posts(space_id: int, since_date: datetime, debug: bool = False) 
 
     try:
         while True:
-            url = f"{CIRCLE_API_BASE}/comments/posts"
+            url = f"{CIRCLE_API_BASE}/posts"
             params = {
                 "space_id": space_id,
                 "status": "published",
