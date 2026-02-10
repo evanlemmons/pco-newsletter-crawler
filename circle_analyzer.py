@@ -257,13 +257,22 @@ def fetch_circle_spaces(debug: bool = False) -> list[dict]:
         raise
 
 
-def fetch_space_posts(space_id: int, since_date: datetime, debug: bool = False) -> list[dict]:
+def fetch_space_posts(space_id: int, since_date: datetime, activity_since_date: datetime = None, debug: bool = False) -> list[dict]:
     """
     Fetch posts from a specific space since a given date.
 
-    Returns list of dicts with: id, name, body, url, created_at, comments_count, likes_count
+    Args:
+        space_id: Circle space ID
+        since_date: Look for posts created since this date (30 days for thread tracking)
+        activity_since_date: Filter for threads with activity since this date (7 days for recent activity)
+                            If None, uses since_date (backward compatible)
+        debug: Enable debug logging
+
+    Returns list of dicts with: id, name, body, url, created_at, comments_count, likes_count, has_recent_activity
     Returns empty list on error (doesn't raise, to allow other spaces to continue)
     """
+    if activity_since_date is None:
+        activity_since_date = since_date
     headers = get_circle_headers()
     posts = []
     page = 1
@@ -402,9 +411,16 @@ def fetch_post_comments(post_id: int, debug: bool = False) -> list[dict]:
 # DATA AGGREGATION
 # ============================================================================
 
-def aggregate_space_content(space: dict, posts: list[dict], debug: bool = False) -> dict:
+def aggregate_space_content(space: dict, posts: list[dict], activity_since_date: datetime, debug: bool = False) -> dict:
     """
     Aggregate posts and comments for a single space.
+    Only includes posts/threads with activity since activity_since_date.
+
+    Args:
+        space: Space dict
+        posts: List of posts (may include older posts)
+        activity_since_date: Only include threads with post or comment activity since this date
+        debug: Enable debug logging
 
     Returns dict with: space_name, post_count, comment_count, content_digest
     """
@@ -413,17 +429,44 @@ def aggregate_space_content(space: dict, posts: list[dict], debug: bool = False)
     if debug:
         logger.info(f"  [DEBUG] Aggregating {len(posts)} posts for space '{space_name}'")
 
-    # Fetch comments for each post
+    # Fetch comments for each post and filter for recent activity
     posts_with_comments = []
     total_comments = 0
+    filtered_count = 0
 
     for post in posts:
         comments = fetch_post_comments(post["id"], debug=debug)
-        posts_with_comments.append({
-            "post": post,
-            "comments": comments
-        })
-        total_comments += len(comments)
+
+        # Check if post or any comment has recent activity
+        post_created_at = datetime.fromisoformat(post["created_at"].replace('Z', '+00:00'))
+        has_recent_post = post_created_at >= activity_since_date
+
+        # Check for recent comments
+        has_recent_comment = False
+        if comments:
+            for comment in comments:
+                try:
+                    comment_created_at = datetime.fromisoformat(comment["created_at"].replace('Z', '+00:00'))
+                    if comment_created_at >= activity_since_date:
+                        has_recent_comment = True
+                        break
+                except (ValueError, TypeError):
+                    continue
+
+        # Only include if there's recent activity (post OR comment)
+        if has_recent_post or has_recent_comment:
+            posts_with_comments.append({
+                "post": post,
+                "comments": comments
+            })
+            total_comments += len(comments)
+            if debug and not has_recent_post and has_recent_comment:
+                logger.info(f"  [DEBUG] Including older post '{post['name'][:50]}...' due to recent comments")
+        else:
+            filtered_count += 1
+
+    if debug and filtered_count > 0:
+        logger.info(f"  [DEBUG] Filtered out {filtered_count} posts with no recent activity")
 
     # Build content digest for AI analysis
     digest_lines = []
@@ -839,16 +882,10 @@ def create_theme_entry(
         # Try to keep at least description, quotes, and first link
         summary = summary[:1900] + "..."
 
-    # Determine topic based on content
-    topic = "Church Tech"  # Default
-    description_lower = theme["description"].lower()
-    if any(word in description_lower for word in ["product", "feature", "roadmap", "planning"]):
-        topic = "Product Management"
-
     properties = {
         "Title": {"title": [{"text": {"content": title}}]},
-        "Type": {"select": {"name": "Article"}},  # Using Article since no Circle-specific type
-        "Topic": {"multi_select": [{"name": topic}]},
+        "Type": {"select": {"name": "Community Discussion"}},
+        "Topic": {"multi_select": [{"name": "Conversation"}]},
         "Date Found": {"date": {"start": date.today().isoformat()}},
         "Summary": {"rich_text": [{"text": {"content": summary}}]},
         "Source Page": {"relation": [{"id": source_page_id}]},
@@ -926,9 +963,14 @@ def main(days_back: int = DEFAULT_DAYS_BACK, dry_run: bool = False, debug: bool 
 
     start_time = time.time()
 
-    # Calculate since_date (timezone-aware for comparison with Circle API timestamps)
-    since_date = datetime.now(timezone.utc) - timedelta(days=days_back)
-    logger.info(f"Analyzing content from past {days_back} days (since {since_date.strftime('%Y-%m-%d')})")
+    # Calculate dates (timezone-aware for comparison with Circle API timestamps)
+    # - activity_since_date: Filter for threads with activity (posts or comments) in this window
+    # - post_lookback_date: Look for posts created in this window (to catch threads with new comments on old posts)
+    activity_since_date = datetime.now(timezone.utc) - timedelta(days=days_back)
+    post_lookback_date = datetime.now(timezone.utc) - timedelta(days=30)  # 30 days to catch threads with new activity
+
+    logger.info(f"Analyzing threads with activity from past {days_back} days (since {activity_since_date.strftime('%Y-%m-%d')})")
+    logger.info(f"Looking for posts created in past 30 days to catch threads with new comments")
 
     # Initialize clients
     notion = get_notion_client()
@@ -984,23 +1026,27 @@ def main(days_back: int = DEFAULT_DAYS_BACK, dry_run: bool = False, debug: bool 
         logger.info(f"\n[{i}/{len(spaces)}] Processing space: {space['name']}")
 
         try:
-            # Fetch posts
-            logger.info(f"  Fetching posts from past {days_back} days...")
-            posts = fetch_space_posts(space["id"], since_date, debug=debug)
-            logger.info(f"  Found {len(posts)} recent posts")
+            # Fetch posts (look back 30 days to catch threads with new comments)
+            logger.info(f"  Fetching posts from past 30 days (to catch threads with new activity)...")
+            posts = fetch_space_posts(space["id"], post_lookback_date, activity_since_date, debug=debug)
+            logger.info(f"  Found {len(posts)} posts")
 
             if not posts:
-                logger.info(f"  Skipping space (no recent posts)")
+                logger.info(f"  Skipping space (no posts in lookback window)")
                 continue
 
-            total_posts += len(posts)
-            spaces_processed += 1
-
-            # Aggregate content
-            logger.info(f"  Aggregating posts and comments...")
+            # Aggregate content and filter for recent activity (new posts or comments in past 7 days)
+            logger.info(f"  Aggregating posts/comments and filtering for recent activity...")
             try:
-                space_data = aggregate_space_content(space, posts, debug=debug)
-                logger.info(f"  Total: {space_data['post_count']} posts, {space_data['comment_count']} comments")
+                space_data = aggregate_space_content(space, posts, activity_since_date, debug=debug)
+                logger.info(f"  Threads with recent activity: {space_data['post_count']} posts, {space_data['comment_count']} comments")
+
+                if space_data['post_count'] == 0:
+                    logger.info(f"  Skipping space (no recent activity in past {days_back} days)")
+                    continue
+
+                total_posts += space_data['post_count']
+                spaces_processed += 1
             except Exception as e:
                 logger.error(f"  Failed to aggregate content: {e}")
                 spaces_with_errors.append((space['name'], f"Aggregation error: {str(e)[:100]}"))
