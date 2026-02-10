@@ -1,17 +1,17 @@
 name: Circle Community Analyzer
 
 on:
-  # Run every Monday at 6:30 AM UTC (offset from blog crawler)
+  # Run every 2 weeks on 1st and 15th of month at 6:30 AM UTC
   schedule:
-    - cron: '30 6 * * 1'
+    - cron: '30 6 1,15 * *'
 
   # Allow manual trigger from GitHub UI
   workflow_dispatch:
     inputs:
       days_back:
-        description: 'Days to look back (default: 7)'
+        description: 'Days to look back (default: 14)'
         required: false
-        default: '7'
+        default: '14'
         type: string
       dry_run:
         description: 'Dry run (show what would be analyzed)'

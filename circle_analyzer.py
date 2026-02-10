@@ -56,7 +56,7 @@ SOURCE_REGISTRY_DS = "902cd405-8998-4dc8-8810-ae8f54e3f61a"
 NEWSLETTER_PIPELINE_DS = "2efabbce-69a2-8016-b362-000bfe5c9a11"
 
 # Defaults
-DEFAULT_DAYS_BACK = 7
+DEFAULT_DAYS_BACK = 14  # 2 weeks to capture enough activity for meaningful analysis
 MAX_THEMES_PER_RUN = 5
 
 # ============================================================================
@@ -967,10 +967,10 @@ def main(days_back: int = DEFAULT_DAYS_BACK, dry_run: bool = False, debug: bool 
     # - activity_since_date: Filter for threads with activity (posts or comments) in this window
     # - post_lookback_date: Look for posts created in this window (to catch threads with new comments on old posts)
     activity_since_date = datetime.now(timezone.utc) - timedelta(days=days_back)
-    post_lookback_date = datetime.now(timezone.utc) - timedelta(days=30)  # 30 days to catch threads with new activity
+    post_lookback_date = datetime.now(timezone.utc) - timedelta(days=60)  # 60 days to catch threads with new activity
 
     logger.info(f"Analyzing threads with activity from past {days_back} days (since {activity_since_date.strftime('%Y-%m-%d')})")
-    logger.info(f"Looking for posts created in past 30 days to catch threads with new comments")
+    logger.info(f"Looking for posts created in past 60 days to catch threads with new comments")
 
     # Initialize clients
     notion = get_notion_client()
@@ -1026,8 +1026,8 @@ def main(days_back: int = DEFAULT_DAYS_BACK, dry_run: bool = False, debug: bool 
         logger.info(f"\n[{i}/{len(spaces)}] Processing space: {space['name']}")
 
         try:
-            # Fetch posts (look back 30 days to catch threads with new comments)
-            logger.info(f"  Fetching posts from past 30 days (to catch threads with new activity)...")
+            # Fetch posts (look back 60 days to catch threads with new comments)
+            logger.info(f"  Fetching posts from past 60 days (to catch threads with new activity)...")
             posts = fetch_space_posts(space["id"], post_lookback_date, activity_since_date, debug=debug)
             logger.info(f"  Found {len(posts)} posts")
 
