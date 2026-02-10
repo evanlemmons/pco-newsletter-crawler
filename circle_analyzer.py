@@ -147,6 +147,61 @@ def query_data_source(notion: Client, data_source_id: str, filter_query=None, st
 # CIRCLE API CLIENT
 # ============================================================================
 
+def make_circle_api_request(url: str, params: dict, headers: dict, max_retries: int = 3, debug: bool = False):
+    """
+    Make a Circle API request with retry logic and comprehensive error handling.
+
+    Returns: Response data dict
+    Raises: requests.exceptions.RequestException on failure after retries
+    """
+    for attempt in range(max_retries):
+        try:
+            time.sleep(REQUEST_DELAY)  # Rate limiting
+            response = requests.get(url, headers=headers, params=params, timeout=30)
+
+            # Handle rate limiting (429) with exponential backoff
+            if response.status_code == 429:
+                retry_after = int(response.headers.get('Retry-After', 60))
+                logger.warning(f"Rate limited. Waiting {retry_after}s before retry {attempt + 1}/{max_retries}")
+                time.sleep(retry_after)
+                continue
+
+            # Handle server errors (5xx) with retry
+            if response.status_code >= 500:
+                wait_time = (2 ** attempt) * REQUEST_DELAY  # Exponential backoff
+                logger.warning(f"Server error {response.status_code}. Retrying in {wait_time}s (attempt {attempt + 1}/{max_retries})")
+                time.sleep(wait_time)
+                continue
+
+            response.raise_for_status()
+            return response.json()
+
+        except requests.exceptions.Timeout:
+            logger.warning(f"Request timeout. Retrying (attempt {attempt + 1}/{max_retries})")
+            if attempt < max_retries - 1:
+                time.sleep((2 ** attempt) * REQUEST_DELAY)
+                continue
+            raise
+
+        except requests.exceptions.RequestException as e:
+            if attempt < max_retries - 1 and hasattr(e, 'response') and e.response is not None:
+                status = e.response.status_code
+                # Retry on specific error codes
+                if status in [408, 429, 500, 502, 503, 504]:
+                    wait_time = (2 ** attempt) * REQUEST_DELAY
+                    logger.warning(f"API error {status}. Retrying in {wait_time}s (attempt {attempt + 1}/{max_retries})")
+                    time.sleep(wait_time)
+                    continue
+
+            # Log detailed error information
+            if hasattr(e, 'response') and e.response is not None:
+                logger.error(f"API request failed with status {e.response.status_code}")
+                logger.error(f"Response body: {e.response.text[:500]}")
+            raise
+
+    raise requests.exceptions.RequestException(f"Max retries ({max_retries}) exceeded")
+
+
 def fetch_circle_spaces(debug: bool = False) -> list[dict]:
     """
     Fetch all community spaces from Circle API.
@@ -157,45 +212,49 @@ def fetch_circle_spaces(debug: bool = False) -> list[dict]:
     spaces = []
     page = 1
 
-    while True:
-        url = f"{CIRCLE_API_BASE}/spaces"
-        params = {"page": page, "per_page": 100}
-
-        if debug:
-            logger.info(f"  [DEBUG] Fetching spaces page {page}: {url}")
-
-        try:
-            time.sleep(REQUEST_DELAY)  # Rate limiting
-            response = requests.get(url, headers=headers, params=params, timeout=30)
-            response.raise_for_status()
-            data = response.json()
+    try:
+        while True:
+            url = f"{CIRCLE_API_BASE}/spaces"
+            params = {"page": page, "per_page": 100}
 
             if debug:
-                logger.info(f"  [DEBUG] Response: {len(data.get('records', []))} spaces on this page")
+                logger.info(f"  [DEBUG] Fetching spaces page {page}: {url}")
 
-            records = data.get("records", [])
-            if not records:
-                break
+            try:
+                data = make_circle_api_request(url, params, headers, debug=debug)
 
-            for space in records:
-                spaces.append({
-                    "id": space.get("id"),
-                    "name": space.get("name", ""),
-                    "slug": space.get("slug", ""),
-                    "posts_count": space.get("posts_count", 0),
-                })
+                if debug:
+                    logger.info(f"  [DEBUG] Response: {len(data.get('records', []))} spaces on this page")
 
-            # Check pagination
-            if not data.get("has_next_page", False):
-                break
+                records = data.get("records", [])
+                if not records:
+                    break
 
-            page += 1
+                for space in records:
+                    spaces.append({
+                        "id": space.get("id"),
+                        "name": space.get("name", ""),
+                        "slug": space.get("slug", ""),
+                        "posts_count": space.get("posts_count", 0),
+                    })
 
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Failed to fetch spaces: {e}")
-            raise
+                # Check pagination
+                if not data.get("has_next_page", False):
+                    break
 
-    return spaces
+                page += 1
+
+            except requests.exceptions.RequestException as e:
+                logger.error(f"Failed to fetch spaces page {page}: {e}")
+                raise
+
+        logger.info(f"Successfully fetched {len(spaces)} spaces")
+        return spaces
+
+    except Exception as e:
+        logger.error(f"Critical error fetching Circle spaces: {e}")
+        logger.exception("Full traceback:")
+        raise
 
 
 def fetch_space_posts(space_id: int, since_date: datetime, debug: bool = False) -> list[dict]:
@@ -203,71 +262,79 @@ def fetch_space_posts(space_id: int, since_date: datetime, debug: bool = False) 
     Fetch posts from a specific space since a given date.
 
     Returns list of dicts with: id, name, body, url, created_at, comments_count, likes_count
+    Returns empty list on error (doesn't raise, to allow other spaces to continue)
     """
     headers = get_circle_headers()
     posts = []
     page = 1
 
-    while True:
-        url = f"{CIRCLE_API_BASE}/comments/posts"
-        params = {
-            "space_id": space_id,
-            "status": "published",
-            "page": page,
-            "per_page": 100
-        }
+    try:
+        while True:
+            url = f"{CIRCLE_API_BASE}/comments/posts"
+            params = {
+                "space_id": space_id,
+                "status": "published",
+                "page": page,
+                "per_page": 100
+            }
 
-        if debug:
-            logger.info(f"  [DEBUG] Fetching posts for space {space_id}, page {page}")
+            if debug:
+                logger.info(f"  [DEBUG] Fetching posts for space {space_id}, page {page}")
 
-        try:
-            time.sleep(REQUEST_DELAY)  # Rate limiting
-            response = requests.get(url, headers=headers, params=params, timeout=30)
-            response.raise_for_status()
-            data = response.json()
+            try:
+                data = make_circle_api_request(url, params, headers, debug=debug)
 
-            records = data.get("records", [])
-            if not records:
-                break
+                records = data.get("records", [])
+                if not records:
+                    break
 
-            for post in records:
-                created_at_str = post.get("created_at", "")
-                try:
-                    # Parse ISO timestamp
-                    created_at = datetime.fromisoformat(created_at_str.replace('Z', '+00:00'))
+                for post in records:
+                    created_at_str = post.get("created_at", "")
+                    try:
+                        # Parse ISO timestamp
+                        created_at = datetime.fromisoformat(created_at_str.replace('Z', '+00:00'))
 
-                    # Filter by date
-                    if created_at < since_date:
-                        # Posts are typically returned newest first, so we can stop
-                        if debug:
-                            logger.info(f"  [DEBUG] Reached posts older than {since_date}, stopping")
-                        return posts
+                        # Filter by date
+                        if created_at < since_date:
+                            # Posts are typically returned newest first, so we can stop
+                            if debug:
+                                logger.info(f"  [DEBUG] Reached posts older than {since_date}, stopping")
+                            return posts
 
-                    posts.append({
-                        "id": post.get("id"),
-                        "name": post.get("name", ""),
-                        "body": post.get("body", ""),
-                        "url": post.get("url", ""),
-                        "created_at": created_at_str,
-                        "comments_count": post.get("comments_count", 0),
-                        "likes_count": post.get("likes_count", 0),
-                    })
+                        posts.append({
+                            "id": post.get("id"),
+                            "name": post.get("name", ""),
+                            "body": post.get("body", ""),
+                            "url": post.get("url", ""),
+                            "created_at": created_at_str,
+                            "comments_count": post.get("comments_count", 0),
+                            "likes_count": post.get("likes_count", 0),
+                        })
 
-                except (ValueError, TypeError) as e:
-                    logger.warning(f"Failed to parse date for post {post.get('id')}: {e}")
-                    continue
+                    except (ValueError, TypeError) as e:
+                        post_id = post.get('id', 'unknown')
+                        logger.warning(f"Skipping post {post_id} in space {space_id}: Date parse error - {e}")
+                        continue
 
-            # Check pagination
-            if not data.get("has_next_page", False):
-                break
+                # Check pagination
+                if not data.get("has_next_page", False):
+                    break
 
-            page += 1
+                page += 1
 
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Failed to fetch posts for space {space_id}: {e}")
-            raise
+            except requests.exceptions.RequestException as e:
+                logger.error(f"Failed to fetch posts page {page} for space {space_id}: {e}")
+                # Return what we have so far instead of raising
+                logger.warning(f"Returning {len(posts)} posts fetched before error")
+                return posts
 
-    return posts
+        return posts
+
+    except Exception as e:
+        logger.error(f"Unexpected error fetching posts for space {space_id}: {e}")
+        logger.exception("Full traceback:")
+        # Return empty list to allow other spaces to continue
+        return []
 
 
 def fetch_post_comments(post_id: int, debug: bool = False) -> list[dict]:
@@ -275,52 +342,60 @@ def fetch_post_comments(post_id: int, debug: bool = False) -> list[dict]:
     Fetch all comments for a specific post.
 
     Returns list of dicts with: id, body, created_at, user_name
+    Returns empty list on error (comments are optional, shouldn't fail the whole process)
     """
     headers = get_circle_headers()
     comments = []
     page = 1
 
-    while True:
-        url = f"{CIRCLE_API_BASE}/comments"
-        params = {
-            "post_id": post_id,
-            "page": page,
-            "per_page": 100
-        }
+    try:
+        while True:
+            url = f"{CIRCLE_API_BASE}/comments"
+            params = {
+                "post_id": post_id,
+                "page": page,
+                "per_page": 100
+            }
 
-        if debug:
-            logger.info(f"  [DEBUG] Fetching comments for post {post_id}, page {page}")
+            if debug:
+                logger.info(f"  [DEBUG] Fetching comments for post {post_id}, page {page}")
 
-        try:
-            time.sleep(REQUEST_DELAY)  # Rate limiting
-            response = requests.get(url, headers=headers, params=params, timeout=30)
-            response.raise_for_status()
-            data = response.json()
+            try:
+                data = make_circle_api_request(url, params, headers, max_retries=2, debug=debug)
 
-            records = data.get("records", [])
-            if not records:
-                break
+                records = data.get("records", [])
+                if not records:
+                    break
 
-            for comment in records:
-                comments.append({
-                    "id": comment.get("id"),
-                    "body": comment.get("body", ""),
-                    "created_at": comment.get("created_at", ""),
-                    "user_name": comment.get("user", {}).get("name", "Unknown"),
-                })
+                for comment in records:
+                    try:
+                        comments.append({
+                            "id": comment.get("id"),
+                            "body": comment.get("body", ""),
+                            "created_at": comment.get("created_at", ""),
+                            "user_name": comment.get("user", {}).get("name", "Unknown"),
+                        })
+                    except Exception as e:
+                        logger.warning(f"Skipping malformed comment in post {post_id}: {e}")
+                        continue
 
-            # Check pagination
-            if not data.get("has_next_page", False):
-                break
+                # Check pagination
+                if not data.get("has_next_page", False):
+                    break
 
-            page += 1
+                page += 1
 
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Failed to fetch comments for post {post_id}: {e}")
-            # Don't raise - comments are optional
-            break
+            except requests.exceptions.RequestException as e:
+                logger.warning(f"Failed to fetch comments page {page} for post {post_id}: {e}")
+                # Return what we have so far - comments are optional
+                return comments
 
-    return comments
+        return comments
+
+    except Exception as e:
+        logger.warning(f"Unexpected error fetching comments for post {post_id}: {e}")
+        # Comments are optional - don't let this fail the analysis
+        return []
 
 
 # ============================================================================
@@ -903,6 +978,8 @@ def main(days_back: int = DEFAULT_DAYS_BACK, dry_run: bool = False, debug: bool 
     # Analyze each space
     all_themes = []
     total_posts = 0
+    spaces_with_errors = []
+    spaces_processed = 0
 
     for i, space in enumerate(spaces, 1):
         logger.info(f"\n[{i}/{len(spaces)}] Processing space: {space['name']}")
@@ -918,28 +995,42 @@ def main(days_back: int = DEFAULT_DAYS_BACK, dry_run: bool = False, debug: bool 
                 continue
 
             total_posts += len(posts)
+            spaces_processed += 1
 
             # Aggregate content
             logger.info(f"  Aggregating posts and comments...")
-            space_data = aggregate_space_content(space, posts, debug=debug)
-            logger.info(f"  Total: {space_data['post_count']} posts, {space_data['comment_count']} comments")
+            try:
+                space_data = aggregate_space_content(space, posts, debug=debug)
+                logger.info(f"  Total: {space_data['post_count']} posts, {space_data['comment_count']} comments")
+            except Exception as e:
+                logger.error(f"  Failed to aggregate content: {e}")
+                spaces_with_errors.append((space['name'], f"Aggregation error: {str(e)[:100]}"))
+                continue
 
             # AI analysis
             logger.info(f"  Analyzing with Claude Sonnet...")
-            themes = analyze_space_with_ai(
-                anthropic_client,
-                space_data,
-                days_back,
-                debug=debug
-            )
+            try:
+                themes = analyze_space_with_ai(
+                    anthropic_client,
+                    space_data,
+                    days_back,
+                    debug=debug
+                )
 
-            if themes:
-                all_themes.extend(themes)
-                for theme in themes:
-                    logger.info(f"    ✓ Theme: {theme['title']}")
+                if themes:
+                    all_themes.extend(themes)
+                    for theme in themes:
+                        logger.info(f"    ✓ Theme: {theme['title']}")
+            except Exception as e:
+                logger.error(f"  Failed to analyze with AI: {e}")
+                spaces_with_errors.append((space['name'], f"AI analysis error: {str(e)[:100]}"))
+                if debug:
+                    logger.exception("Full traceback:")
+                continue
 
         except Exception as e:
             logger.error(f"  Failed to process space '{space['name']}': {e}")
+            spaces_with_errors.append((space['name'], str(e)[:100]))
             if debug:
                 logger.exception("Full traceback:")
             continue
@@ -948,9 +1039,16 @@ def main(days_back: int = DEFAULT_DAYS_BACK, dry_run: bool = False, debug: bool 
     logger.info("\n" + "=" * 60)
     logger.info("ANALYSIS COMPLETE")
     logger.info("=" * 60)
-    logger.info(f"Spaces analyzed: {len(spaces)}")
+    logger.info(f"Spaces found: {len(spaces)}")
+    logger.info(f"Spaces successfully processed: {spaces_processed}")
+    logger.info(f"Spaces with errors: {len(spaces_with_errors)}")
     logger.info(f"Posts analyzed: {total_posts}")
     logger.info(f"Themes identified: {len(all_themes)}")
+
+    if spaces_with_errors:
+        logger.warning("\nSpaces that encountered errors:")
+        for space_name, error in spaces_with_errors:
+            logger.warning(f"  • {space_name}: {error}")
 
     if not all_themes:
         logger.info("No significant themes found. No entries will be created.")
