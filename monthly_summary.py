@@ -118,7 +118,7 @@ def query_data_source(notion: Client, data_source_id: str, filter_query=None, st
 
 def query_recent_articles(notion: Client, start_date: date, end_date: date) -> list[dict]:
     """
-    Query Newsletter Pipeline for Article entries in a date range.
+    Query Newsletter Pipeline for Article and Community Discussion entries in a date range.
 
     Args:
         start_date: Inclusive start date
@@ -130,7 +130,12 @@ def query_recent_articles(notion: Client, start_date: date, end_date: date) -> l
         "and": [
             {"property": "Date Found", "date": {"on_or_after": start_date.isoformat()}},
             {"property": "Date Found", "date": {"before": end_date.isoformat()}},
-            {"property": "Type", "select": {"equals": "Article"}}
+            {
+                "or": [
+                    {"property": "Type", "select": {"equals": "Article"}},
+                    {"property": "Type", "select": {"equals": "Community Discussion"}}
+                ]
+            }
         ]
     }
 
@@ -219,30 +224,51 @@ def build_article_digest(articles: list[dict], max_chars_per_article: int = 300)
     Build a condensed digest of all articles for Claude input.
     Includes URLs so Claude can cite sources in the output.
 
+    Separates Community Discussion entries from regular Articles.
+
     Format:
+    [ARTICLES BY TOPIC]
     [AI/ML - 15 articles]
     - "Article Title" (URL) - Summary truncated...
-    - "Another Article" (URL) - Summary...
 
-    [Church Tech - 8 articles]
-    ...
+    [COMMUNITY DISCUSSIONS]
+    - "Discussion Title" (URL) - Summary...
     """
-    grouped = group_articles_by_topic(articles)
+    # Separate articles by type
+    regular_articles = [a for a in articles if a["type"] == "Article"]
+    community_discussions = [a for a in articles if a["type"] == "Community Discussion"]
 
     lines = []
 
-    # Sort topics by article count (most articles first)
-    sorted_topics = sorted(grouped.items(), key=lambda x: len(x[1]), reverse=True)
+    # Process regular articles grouped by topic
+    if regular_articles:
+        lines.append("\n[ARTICLES BY TOPIC]")
+        grouped = group_articles_by_topic(regular_articles)
+        sorted_topics = sorted(grouped.items(), key=lambda x: len(x[1]), reverse=True)
 
-    for topic, topic_articles in sorted_topics:
-        lines.append(f"\n[{topic} - {len(topic_articles)} articles]")
+        for topic, topic_articles in sorted_topics:
+            lines.append(f"\n[{topic} - {len(topic_articles)} articles]")
 
-        for article in topic_articles:
-            title = article["title"][:100] if article["title"] else "(No title)"
-            url = article["url"] or ""
+            for article in topic_articles:
+                title = article["title"][:100] if article["title"] else "(No title)"
+                url = article["url"] or ""
+
+                # Truncate summary but keep more detail
+                summary = article["summary"] or "(No summary)"
+                if len(summary) > max_chars_per_article:
+                    summary = summary[:max_chars_per_article].rsplit(' ', 1)[0] + "..."
+
+                lines.append(f'- "{title}" ({url}) - {summary}')
+
+    # Process community discussions separately
+    if community_discussions:
+        lines.append(f"\n\n[COMMUNITY DISCUSSIONS - {len(community_discussions)} entries]")
+        for discussion in community_discussions:
+            title = discussion["title"][:100] if discussion["title"] else "(No title)"
+            url = discussion["url"] or ""
 
             # Truncate summary but keep more detail
-            summary = article["summary"] or "(No summary)"
+            summary = discussion["summary"] or "(No summary)"
             if len(summary) > max_chars_per_article:
                 summary = summary[:max_chars_per_article].rsplit(' ', 1)[0] + "..."
 
@@ -305,13 +331,16 @@ SKIP articles that are:
 
 If only 5-10 articles out of {article_count} are truly worth highlighting, that's fine. Quality over quantity.
 
-Write a trend report with these exact section headers (including emojis):
+Write a trend report with these section headers (including emojis):
 
 ## 📈 Emerging Trends
 
 ## 🏢 Major Industry Events
 
 ## 💬 User Sentiment & Pain Points
+
+## 💭 Community Discussions
+[ONLY include this section if there are Community Discussion entries in the digest AND they contain substantial insights worth highlighting. If community discussions are trivial or redundant with other sections, skip this section entirely.]
 
 ## 🎯 Strategic Implications
 
@@ -322,6 +351,8 @@ SECTION CONTENT REQUIREMENTS:
 **🏢 Major Industry Events**: Cover significant events that would impact Planning Center - mentions of "Planning Center" specifically, acquisitions, mergers, partnerships, new product launches from competitors, new technologies being adopted by churches. If nothing major happened, say so briefly and move on.
 
 **💬 User Sentiment & Pain Points**: What are church leaders and administrators talking about? Focus on pain points that Planning Center could address or should be aware of. Skip generic complaints.
+
+**💭 Community Discussions**: [CONDITIONAL SECTION] If the digest includes Community Discussion entries with substantial insights, create this section to highlight key themes, pain points, or feature requests from the Planning Center community. This section should focus on direct user feedback and discussions that differ from external industry content. Do NOT duplicate information that's already covered in other sections. If community discussions don't add unique value beyond what's in other sections, omit this section entirely.
 
 **🎯 Strategic Implications**: Conclude with actionable insights for the product team. What should we pay attention to? What opportunities or threats are emerging? Be specific and tie back to the most important findings.
 
@@ -743,14 +774,18 @@ def main(days_back: int = None, dry_run: bool = False):
         logger.error("Cannot proceed without Anthropic client")
         sys.exit(1)
 
-    # Query recent articles
-    logger.info("Querying Newsletter Pipeline for recent articles...")
+    # Query recent articles and community discussions
+    logger.info("Querying Newsletter Pipeline for recent articles and community discussions...")
     articles = query_recent_articles(notion, period_start, period_end)
 
-    logger.info(f"Found {len(articles)} articles for {month_name}")
+    # Break down by type
+    regular_articles = [a for a in articles if a["type"] == "Article"]
+    community_discussions = [a for a in articles if a["type"] == "Community Discussion"]
+
+    logger.info(f"Found {len(regular_articles)} articles and {len(community_discussions)} community discussions for {month_name}")
 
     if not articles:
-        logger.info("No articles to analyze. Exiting.")
+        logger.info("No content to analyze. Exiting.")
         return
 
     # Build article digest
@@ -764,7 +799,8 @@ def main(days_back: int = None, dry_run: bool = False):
 
     if dry_run:
         logger.info("\n--- DRY RUN MODE ---")
-        logger.info(f"Would analyze {len(articles)} articles")
+        logger.info(f"Would analyze {len(regular_articles)} articles and {len(community_discussions)} community discussions")
+        logger.info(f"Total content: {len(articles)} entries")
         logger.info(f"Digest length: {len(article_digest)} characters")
         logger.info("\nSample of digest (first 2000 chars):")
         logger.info("-" * 40)

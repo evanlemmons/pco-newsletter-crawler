@@ -221,13 +221,61 @@ Check that:
 
 ---
 
+## GitHub MCP Server Integration
+
+This project is configured to work with the [official GitHub MCP server](https://github.com/github/github-mcp-server), which provides direct API access to GitHub from Claude Code.
+
+### Benefits of Using the MCP Server
+
+- **Automated workflow management**: Trigger workflows, check run status, and view logs directly from Claude
+- **No manual navigation**: Access GitHub Actions, issues, PRs, and files without opening a browser
+- **Structured responses**: Get parsed data instead of HTML pages
+- **Better automation**: Integrate GitHub operations into broader workflows
+
+### Available Operations
+
+The GitHub MCP server provides access to:
+- Repository files and structure
+- Workflow runs, logs, and manual triggers
+- Issues and pull requests
+- Commit history and branches
+- Actions status and artifacts
+
+### Setup
+
+1. Install the GitHub MCP server: https://github.com/github/github-mcp-server
+2. Add your GitHub Personal Access Token to the configuration
+3. Configure in `~/.claude/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "github": {
+      "command": "/path/to/github-mcp-server",
+      "args": ["stdio"],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "your_token_here"
+      }
+    }
+  }
+}
+```
+
+4. Enable the toolsets you need (repos, actions, issues, pull_requests, etc.)
+
+See the [GitHub MCP server documentation](https://github.com/github/github-mcp-server) for detailed installation instructions.
+
+---
+
 ## Files
 
 | File | Purpose |
 |------|---------|
 | `newsletter_crawler.py` | Main Python script |
+| `monthly_summary.py` | Monthly summary generator |
 | `requirements.txt` | Python dependencies |
-| `.github/workflows/newsletter-crawler.yml` | GitHub Actions workflow |
+| `.github/workflows/newsletter-crawler.yml` | Weekly crawler workflow |
+| `.github/workflows/monthly-summary.yml` | Monthly summary workflow |
 
 ---
 
