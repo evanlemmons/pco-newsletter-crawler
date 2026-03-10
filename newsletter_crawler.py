@@ -28,7 +28,9 @@ import re
 import time
 import logging
 import requests
+import xml.etree.ElementTree as ET
 from datetime import datetime, date
+from fnmatch import fnmatch
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -624,6 +626,31 @@ def is_article_page(url: str, markdown: str, min_words: int = 100) -> bool:
     return True
 
 
+def _get_reddit_oauth_token() -> Optional[str]:
+    """Get a Reddit OAuth2 bearer token using script app credentials."""
+    client_id = os.environ.get("REDDIT_CLIENT_ID")
+    client_secret = os.environ.get("REDDIT_CLIENT_SECRET")
+    username = os.environ.get("REDDIT_USERNAME")
+    password = os.environ.get("REDDIT_PASSWORD")
+
+    if not all([client_id, client_secret, username, password]):
+        return None
+
+    try:
+        resp = requests.post(
+            "https://www.reddit.com/api/v1/access_token",
+            auth=(client_id, client_secret),
+            data={"grant_type": "password", "username": username, "password": password},
+            headers={"User-Agent": "pco-newsletter-crawler/1.0"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        return resp.json().get("access_token")
+    except Exception as e:
+        logger.warning(f"Reddit OAuth failed, falling back to unauthenticated: {e}")
+        return None
+
+
 async def crawl_reddit(
     url: str,
     max_pages: int = DEFAULT_MAX_PAGES,
@@ -631,18 +658,31 @@ async def crawl_reddit(
     min_words: int = 50,
     debug: bool = False
 ) -> dict:
-    """Crawl a Reddit subreddit using the JSON API instead of browser crawling."""
+    """Crawl a Reddit subreddit using the JSON API (with OAuth2 if credentials available)."""
     start_time = time.time()
     articles = []
 
     try:
-        # Convert to old.reddit.com and append .json
         parsed = urlparse(url)
-        json_url = f"https://old.reddit.com{parsed.path}.json"
-        if debug:
-            logger.info(f"  [DEBUG] Reddit JSON URL: {json_url}")
+        # Extract subreddit path (e.g., /r/churchtech/)
+        path = parsed.path.rstrip("/")
 
-        headers = {"User-Agent": "pco-newsletter-crawler/1.0 (newsletter aggregation)"}
+        # Try OAuth first, fall back to unauthenticated
+        token = _get_reddit_oauth_token()
+        if token:
+            json_url = f"https://oauth.reddit.com{path}/new.json?limit={max_pages}"
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "User-Agent": "pco-newsletter-crawler/1.0",
+            }
+            if debug:
+                logger.info(f"  [DEBUG] Reddit OAuth URL: {json_url}")
+        else:
+            json_url = f"https://old.reddit.com{path}.json"
+            headers = {"User-Agent": "pco-newsletter-crawler/1.0 (newsletter aggregation)"}
+            if debug:
+                logger.info(f"  [DEBUG] Reddit unauthenticated URL: {json_url}")
+
         resp = requests.get(json_url, headers=headers, timeout=15)
         resp.raise_for_status()
         data = resp.json()
@@ -713,6 +753,150 @@ async def crawl_reddit(
         }
 
 
+async def crawl_sitemap(
+    url: str,
+    pattern: Optional[str] = None,
+    max_pages: int = DEFAULT_MAX_PAGES,
+    anthropic_client=None,
+    crawl_config: dict = None,
+    min_words: int = 100,
+    debug: bool = False
+) -> dict:
+    """Crawl a site by discovering URLs from its sitemap.xml, then crawling each individually."""
+    if crawl_config is None:
+        crawl_config = {}
+
+    start_time = time.time()
+    articles = []
+    pages_crawled = 0
+
+    try:
+        # Determine sitemap URL
+        sitemap_url = crawl_config.get("sitemap_url")
+        if not sitemap_url:
+            parsed = urlparse(url)
+            sitemap_url = f"{parsed.scheme}://{parsed.netloc}/sitemap.xml"
+
+        if debug:
+            logger.info(f"  [DEBUG] Fetching sitemap: {sitemap_url}")
+
+        resp = requests.get(sitemap_url, headers={"User-Agent": "pco-newsletter-crawler/1.0"}, timeout=15)
+        resp.raise_for_status()
+
+        # Parse sitemap XML
+        root = ET.fromstring(resp.content)
+        # Handle namespace (sitemaps use xmlns)
+        ns = {"sm": "http://www.sitemaps.org/schemas/sitemap/0.9"}
+        loc_elements = root.findall(".//sm:loc", ns)
+        if not loc_elements:
+            # Try without namespace
+            loc_elements = root.findall(".//loc")
+
+        all_urls = [loc.text.strip() for loc in loc_elements if loc.text]
+        if debug:
+            logger.info(f"  [DEBUG] Sitemap contains {len(all_urls)} URLs")
+
+        # Filter URLs by crawl pattern
+        if pattern and pattern.strip():
+            raw_patterns = [p.strip() for p in pattern.split(',')]
+            wildcard_patterns = [f"*{p}*" if not p.startswith('*') else p for p in raw_patterns]
+            filtered_urls = [u for u in all_urls if any(fnmatch(u, wp) for wp in wildcard_patterns)]
+            if debug:
+                logger.info(f"  [DEBUG] Filtered to {len(filtered_urls)} URLs matching patterns {wildcard_patterns}")
+        else:
+            filtered_urls = all_urls
+
+        # Limit to max_pages
+        urls_to_crawl = filtered_urls[:max_pages]
+
+        if not CRAWL4AI_AVAILABLE:
+            return {"success": False, "articles": [], "pages_crawled": 0,
+                    "duration": time.time() - start_time, "error": "Crawl4AI not installed"}
+
+        # Build per-page crawl config with JS rendering overrides
+        run_config_kwargs = {
+            "markdown_generator": DefaultMarkdownGenerator(
+                content_filter=PruningContentFilter(threshold=0.4)
+            ),
+            "excluded_tags": ['nav', 'footer', 'aside', 'header'],
+            "remove_overlay_elements": True,
+            "process_iframes": False,
+        }
+        for key in ["wait_for", "wait_until", "delay_before_return_html", "scan_full_page", "scroll_delay", "magic"]:
+            if key in crawl_config:
+                run_config_kwargs[key] = crawl_config[key]
+
+        crawler_config = CrawlerRunConfig(**run_config_kwargs)
+        browser_config = BrowserConfig(headless=True, verbose=debug)
+
+        async with AsyncWebCrawler(config=browser_config) as crawler:
+            for page_url in urls_to_crawl:
+                try:
+                    result = await crawler.arun(page_url, config=crawler_config)
+                    pages_crawled += 1
+
+                    if not isinstance(result, list):
+                        result = [result]
+                    result = result[0]
+
+                    if not result.success:
+                        if debug:
+                            logger.info(f"  [DEBUG] Failed to crawl: {page_url}")
+                        continue
+
+                    markdown = ""
+                    if hasattr(result, 'markdown'):
+                        if hasattr(result.markdown, 'fit_markdown'):
+                            markdown = result.markdown.fit_markdown or result.markdown.raw_markdown or ""
+                        elif isinstance(result.markdown, str):
+                            markdown = result.markdown
+
+                    if not is_article_page(page_url, markdown, min_words=min_words):
+                        if debug:
+                            logger.info(f"  [DEBUG] Skipping (too short): {page_url}")
+                        continue
+
+                    title = extract_title_from_markdown(markdown, page_url)
+                    article_date = extract_date_from_content(markdown, page_url)
+                    summary = generate_ai_summary(anthropic_client, markdown, title)
+
+                    articles.append({
+                        "title": title,
+                        "url": page_url,
+                        "date": article_date,
+                        "summary": summary,
+                    })
+                    if debug:
+                        logger.info(f"  [DEBUG] Added article: {title[:50]}...")
+
+                except Exception as e:
+                    if debug:
+                        logger.warning(f"  [DEBUG] Error crawling {page_url}: {e}")
+                    pages_crawled += 1
+                    continue
+
+        duration = time.time() - start_time
+        return {
+            "success": True,
+            "articles": articles,
+            "pages_crawled": pages_crawled,
+            "duration": duration,
+            "error": None,
+        }
+
+    except Exception as e:
+        duration = time.time() - start_time
+        if debug:
+            logger.error(f"  [DEBUG] Sitemap crawl error: {str(e)}")
+        return {
+            "success": False,
+            "articles": articles,
+            "pages_crawled": pages_crawled,
+            "duration": duration,
+            "error": str(e),
+        }
+
+
 async def crawl_source(
     url: str,
     pattern: Optional[str] = None,
@@ -732,6 +916,10 @@ async def crawl_source(
     # Reddit strategy: bypass Crawl4AI entirely
     if crawl_config.get("strategy") == "reddit":
         return await crawl_reddit(url, max_pages, anthropic_client, min_words=min_words, debug=debug)
+
+    # Sitemap strategy: discover URLs from sitemap.xml, crawl individually
+    if crawl_config.get("strategy") == "sitemap":
+        return await crawl_sitemap(url, pattern, max_pages, anthropic_client, crawl_config, min_words=min_words, debug=debug)
 
     if not CRAWL4AI_AVAILABLE:
         return {
