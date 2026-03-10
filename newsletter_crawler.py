@@ -21,11 +21,13 @@ Usage:
 
 import asyncio
 import argparse
+import json
 import os
 import sys
 import re
 import time
 import logging
+import requests
 from datetime import datetime, date
 from typing import Optional
 from urllib.parse import urlparse
@@ -64,9 +66,10 @@ CATEGORY_TO_TOPIC = {
 }
 
 # Defaults
-DEFAULT_MAX_PAGES = 5
+DEFAULT_MAX_PAGES = 10
 DEFAULT_MAX_DEPTH = 2
 MAX_CONSECUTIVE_FAILURES = 3
+MAX_CONSECUTIVE_ZEROS = 4  # Auto-flag sources with this many consecutive zero-result crawls
 
 # ============================================================================
 # NOTION CLIENT
@@ -216,11 +219,22 @@ def query_active_sources(notion: Client, frequencies: list[str]) -> list[dict]:
             max_pages = props.get("Max Pages", {}).get("number") or DEFAULT_MAX_PAGES
             max_depth = props.get("Max Depth", {}).get("number") or DEFAULT_MAX_DEPTH
             consecutive_failures = props.get("Consecutive Failures", {}).get("number") or 0
-            
+            consecutive_zeros = props.get("Consecutive Zeros", {}).get("number") or 0
+
+            # Read optional Crawl Config JSON field
+            crawl_config_raw = ""
+            if props.get("Crawl Config", {}).get("rich_text"):
+                crawl_config_raw = props["Crawl Config"]["rich_text"][0]["plain_text"] if props["Crawl Config"]["rich_text"] else ""
+            try:
+                crawl_config = json.loads(crawl_config_raw) if crawl_config_raw else {}
+            except json.JSONDecodeError:
+                crawl_config = {}
+                logger.warning(f"Invalid JSON in Crawl Config for source '{name}': {crawl_config_raw}")
+
             check_frequency = ""
             if props.get("Check Frequency", {}).get("select"):
                 check_frequency = props["Check Frequency"]["select"]["name"]
-            
+
             sources.append({
                 "page_id": page["id"],
                 "name": name,
@@ -230,6 +244,8 @@ def query_active_sources(notion: Client, frequencies: list[str]) -> list[dict]:
                 "max_pages": int(max_pages),
                 "max_depth": int(max_depth),
                 "consecutive_failures": int(consecutive_failures),
+                "consecutive_zeros": int(consecutive_zeros),
+                "crawl_config": crawl_config,
                 "check_frequency": check_frequency,
             })
         
@@ -381,28 +397,39 @@ def update_source_status(
     pages_crawled: int,
     duration: float,
     error: Optional[str],
-    current_failures: int
+    current_failures: int,
+    current_zeros: int = 0
 ) -> None:
     """Update Source Registry entry with crawl results."""
-    
+
     today_iso = date.today().isoformat()
-    
+
     properties = {
         "Last Reviewed": {"date": {"start": today_iso}},
     }
-    
+
     if success and articles_found > 0:
         # Success with content
         properties["Last Success"] = {"date": {"start": today_iso}}
         properties["Consecutive Failures"] = {"number": 0}
+        properties["Consecutive Zeros"] = {"number": 0}
         properties["Crawl Notes"] = {
             "rich_text": [{"text": {"content": f"Found {articles_found} articles, crawled {pages_crawled} pages in {duration:.1f}s"}}]
         }
     elif success and articles_found == 0:
-        # Success but no new content (not a failure)
-        properties["Crawl Notes"] = {
-            "rich_text": [{"text": {"content": f"No new articles found. Crawled {pages_crawled} pages in {duration:.1f}s"}}]
-        }
+        # Success but no new content — track consecutive zeros
+        new_zeros = current_zeros + 1
+        properties["Consecutive Zeros"] = {"number": new_zeros}
+
+        if new_zeros >= MAX_CONSECUTIVE_ZEROS:
+            properties["Status"] = {"select": {"name": "Needs Review"}}
+            properties["Crawl Notes"] = {
+                "rich_text": [{"text": {"content": f"Auto-flagged: no articles found in {new_zeros} consecutive crawls. Crawled {pages_crawled} pages in {duration:.1f}s"}}]
+            }
+        else:
+            properties["Crawl Notes"] = {
+                "rich_text": [{"text": {"content": f"No new articles found ({new_zeros}/{MAX_CONSECUTIVE_ZEROS} zeros). Crawled {pages_crawled} pages in {duration:.1f}s"}}]
+            }
     else:
         # Failure
         new_failures = current_failures + 1
@@ -581,19 +608,109 @@ Write a concise but informative plain text summary (under {max_length} character
         return extract_summary(markdown, max_length)
 
 
-def is_article_page(url: str, markdown: str) -> bool:
+def is_article_page(url: str, markdown: str, min_words: int = 100) -> bool:
     """
     Determine if a page has enough content to be worth summarizing.
 
     URL filtering is handled by the crawl pattern in Notion, so we only
-    check for minimum content length here.
+    check for minimum content length here. min_words can be overridden
+    per-source via the Crawl Config field.
     """
     if markdown:
         word_count = len(markdown.split())
-        if word_count < 100:
+        if word_count < min_words:
             return False
 
     return True
+
+
+async def crawl_reddit(
+    url: str,
+    max_pages: int = DEFAULT_MAX_PAGES,
+    anthropic_client=None,
+    min_words: int = 50,
+    debug: bool = False
+) -> dict:
+    """Crawl a Reddit subreddit using the JSON API instead of browser crawling."""
+    start_time = time.time()
+    articles = []
+
+    try:
+        # Convert to old.reddit.com and append .json
+        parsed = urlparse(url)
+        json_url = f"https://old.reddit.com{parsed.path}.json"
+        if debug:
+            logger.info(f"  [DEBUG] Reddit JSON URL: {json_url}")
+
+        headers = {"User-Agent": "pco-newsletter-crawler/1.0 (newsletter aggregation)"}
+        resp = requests.get(json_url, headers=headers, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+
+        # Reddit returns a list for subreddit listings
+        listing = data if isinstance(data, dict) else data[0] if isinstance(data, list) else None
+        if not listing or "data" not in listing:
+            return {"success": False, "articles": [], "pages_crawled": 0,
+                    "duration": time.time() - start_time, "error": "Unexpected Reddit JSON structure"}
+
+        children = listing["data"].get("children", [])
+        if debug:
+            logger.info(f"  [DEBUG] Reddit returned {len(children)} posts")
+
+        for child in children[:max_pages]:
+            post = child.get("data", {})
+            if post.get("stickied"):
+                continue
+
+            title = post.get("title", "")
+            permalink = post.get("permalink", "")
+            selftext = post.get("selftext", "")
+            post_url = f"https://www.reddit.com{permalink}" if permalink else post.get("url", "")
+            created_utc = post.get("created_utc")
+
+            # Check minimum content
+            word_count = len(selftext.split()) if selftext else 0
+            if word_count < min_words and not post.get("url", "").startswith("http"):
+                if debug:
+                    logger.info(f"  [DEBUG] Skipping short post: {title[:50]} ({word_count} words)")
+                continue
+
+            # Use selftext as markdown content for summary
+            article_date = None
+            if created_utc:
+                article_date = datetime.utcfromtimestamp(created_utc).strftime('%Y-%m-%d')
+
+            summary = generate_ai_summary(anthropic_client, selftext, title) if selftext else f"Reddit post: {title}"
+
+            articles.append({
+                "title": title,
+                "url": post_url,
+                "date": article_date,
+                "summary": summary,
+            })
+            if debug:
+                logger.info(f"  [DEBUG] Added Reddit post: {title[:50]}...")
+
+        duration = time.time() - start_time
+        return {
+            "success": True,
+            "articles": articles,
+            "pages_crawled": len(children),
+            "duration": duration,
+            "error": None,
+        }
+
+    except Exception as e:
+        duration = time.time() - start_time
+        if debug:
+            logger.error(f"  [DEBUG] Reddit crawl error: {str(e)}")
+        return {
+            "success": False,
+            "articles": [],
+            "pages_crawled": 0,
+            "duration": duration,
+            "error": str(e),
+        }
 
 
 async def crawl_source(
@@ -601,10 +718,20 @@ async def crawl_source(
     pattern: Optional[str] = None,
     max_pages: int = DEFAULT_MAX_PAGES,
     max_depth: int = DEFAULT_MAX_DEPTH,
-    anthropic_client = None,
+    anthropic_client=None,
+    crawl_config: dict = None,
     debug: bool = False
 ) -> dict:
     """Crawl a source URL and return discovered articles."""
+
+    if crawl_config is None:
+        crawl_config = {}
+
+    min_words = crawl_config.get("min_words", 100)
+
+    # Reddit strategy: bypass Crawl4AI entirely
+    if crawl_config.get("strategy") == "reddit":
+        return await crawl_reddit(url, max_pages, anthropic_client, min_words=min_words, debug=debug)
 
     if not CRAWL4AI_AVAILABLE:
         return {
@@ -645,21 +772,31 @@ async def crawl_source(
 
         if debug:
             logger.info(f"  [DEBUG] Deep crawl config: max_depth={max_depth}, max_pages={max_pages}")
+            if crawl_config:
+                logger.info(f"  [DEBUG] Crawl config overrides: {crawl_config}")
 
         browser_config = BrowserConfig(
             headless=True,
             verbose=debug  # Enable verbose mode when debugging
         )
 
-        crawler_config = CrawlerRunConfig(
-            deep_crawl_strategy=deep_crawl_strategy,
-            markdown_generator=DefaultMarkdownGenerator(
+        # Build CrawlerRunConfig with per-source overrides from Crawl Config
+        run_config_kwargs = {
+            "deep_crawl_strategy": deep_crawl_strategy,
+            "markdown_generator": DefaultMarkdownGenerator(
                 content_filter=PruningContentFilter(threshold=0.4)
             ),
-            excluded_tags=['nav', 'footer', 'aside', 'header'],
-            remove_overlay_elements=True,
-            process_iframes=False
-        )
+            "excluded_tags": ['nav', 'footer', 'aside', 'header'],
+            "remove_overlay_elements": True,
+            "process_iframes": False,
+        }
+
+        # Apply Crawl Config overrides for Crawl4AI-native parameters
+        for key in ["wait_for", "wait_until", "delay_before_return_html", "scan_full_page", "scroll_delay", "magic"]:
+            if key in crawl_config:
+                run_config_kwargs[key] = crawl_config[key]
+
+        crawler_config = CrawlerRunConfig(**run_config_kwargs)
         
         async with AsyncWebCrawler(config=browser_config) as crawler:
             results = await crawler.arun(url, config=crawler_config)
@@ -710,9 +847,9 @@ async def crawl_source(
                 if debug:
                     logger.info(f"  [DEBUG]   Markdown length: {len(markdown)} chars")
 
-                if not is_article_page(result.url, markdown):
+                if not is_article_page(result.url, markdown, min_words=min_words):
                     if debug:
-                        logger.info(f"  [DEBUG]   Skipping - not an article page")
+                        logger.info(f"  [DEBUG]   Skipping - not an article page (min_words={min_words})")
                     continue
 
                 title = extract_title_from_markdown(markdown, result.url)
@@ -769,7 +906,7 @@ async def process_source(notion: Client, source: dict, anthropic_client=None, de
     logger.info(f"Processing: {source['name']} ({source['url']})")
 
     if debug:
-        logger.info(f"  [DEBUG] Source config: pattern='{source['crawl_pattern']}', max_pages={source['max_pages']}, max_depth={source['max_depth']}")
+        logger.info(f"  [DEBUG] Source config: pattern='{source['crawl_pattern']}', max_pages={source['max_pages']}, max_depth={source['max_depth']}, crawl_config={source.get('crawl_config', {})}")
 
     # Crawl the source
     crawl_result = await crawl_source(
@@ -778,6 +915,7 @@ async def process_source(notion: Client, source: dict, anthropic_client=None, de
         max_pages=source["max_pages"],
         max_depth=source["max_depth"],
         anthropic_client=anthropic_client,
+        crawl_config=source.get("crawl_config", {}),
         debug=debug
     )
 
@@ -894,6 +1032,8 @@ async def main(force_all: bool = False, dry_run: bool = False, debug: bool = Fal
             logger.info(f"  Max pages: {source['max_pages']}, Max depth: {source['max_depth']}")
             logger.info(f"  Frequency: {source['check_frequency']}")
             logger.info(f"  Category: {source.get('category', '(none)')}")
+            if source.get('crawl_config'):
+                logger.info(f"  Crawl Config: {source['crawl_config']}")
         return
 
     # Process each source
@@ -911,7 +1051,8 @@ async def main(force_all: bool = False, dry_run: bool = False, debug: bool = Fal
             pages_crawled=result["pages_crawled"],
             duration=result["duration"],
             error=result["error"],
-            current_failures=source["consecutive_failures"]
+            current_failures=source["consecutive_failures"],
+            current_zeros=source.get("consecutive_zeros", 0)
         )
     
     # Summary
