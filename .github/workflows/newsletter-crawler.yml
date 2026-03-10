@@ -23,6 +23,11 @@ on:
         required: false
         default: false
         type: boolean
+      source:
+        description: 'Crawl only sources matching this name (partial match)'
+        required: false
+        default: ''
+        type: string
 
 jobs:
   crawl:
@@ -53,10 +58,6 @@ jobs:
         env:
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          REDDIT_CLIENT_ID: ${{ secrets.REDDIT_CLIENT_ID }}
-          REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
-          REDDIT_USERNAME: ${{ secrets.REDDIT_USERNAME }}
-          REDDIT_PASSWORD: ${{ secrets.REDDIT_PASSWORD }}
           GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           # Build command with optional flags
@@ -72,6 +73,10 @@ jobs:
 
           if [ "${{ github.event.inputs.debug }}" == "true" ]; then
             CMD="$CMD --debug"
+          fi
+
+          if [ -n "${{ github.event.inputs.source }}" ]; then
+            CMD="$CMD --source '${{ github.event.inputs.source }}'"
           fi
 
           echo "Running: $CMD"
