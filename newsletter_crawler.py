@@ -626,31 +626,6 @@ def is_article_page(url: str, markdown: str, min_words: int = 100) -> bool:
     return True
 
 
-def _get_reddit_oauth_token() -> Optional[str]:
-    """Get a Reddit OAuth2 bearer token using script app credentials."""
-    client_id = os.environ.get("REDDIT_CLIENT_ID")
-    client_secret = os.environ.get("REDDIT_CLIENT_SECRET")
-    username = os.environ.get("REDDIT_USERNAME")
-    password = os.environ.get("REDDIT_PASSWORD")
-
-    if not all([client_id, client_secret, username, password]):
-        return None
-
-    try:
-        resp = requests.post(
-            "https://www.reddit.com/api/v1/access_token",
-            auth=(client_id, client_secret),
-            data={"grant_type": "password", "username": username, "password": password},
-            headers={"User-Agent": "pco-newsletter-crawler/1.0"},
-            timeout=10,
-        )
-        resp.raise_for_status()
-        return resp.json().get("access_token")
-    except Exception as e:
-        logger.warning(f"Reddit OAuth failed, falling back to unauthenticated: {e}")
-        return None
-
-
 async def crawl_reddit(
     url: str,
     max_pages: int = DEFAULT_MAX_PAGES,
@@ -658,69 +633,62 @@ async def crawl_reddit(
     min_words: int = 50,
     debug: bool = False
 ) -> dict:
-    """Crawl a Reddit subreddit using the JSON API (with OAuth2 if credentials available)."""
+    """Crawl a Reddit subreddit using its public RSS feed (Atom XML)."""
     start_time = time.time()
     articles = []
 
     try:
         parsed = urlparse(url)
-        # Extract subreddit path (e.g., /r/churchtech/)
         path = parsed.path.rstrip("/")
+        rss_url = f"https://www.reddit.com{path}/.rss"
 
-        # Try OAuth first, fall back to unauthenticated
-        token = _get_reddit_oauth_token()
-        if token:
-            json_url = f"https://oauth.reddit.com{path}/new.json?limit={max_pages}"
-            headers = {
-                "Authorization": f"Bearer {token}",
-                "User-Agent": "pco-newsletter-crawler/1.0",
-            }
-            if debug:
-                logger.info(f"  [DEBUG] Reddit OAuth URL: {json_url}")
-        else:
-            json_url = f"https://old.reddit.com{path}.json"
-            headers = {"User-Agent": "pco-newsletter-crawler/1.0 (newsletter aggregation)"}
-            if debug:
-                logger.info(f"  [DEBUG] Reddit unauthenticated URL: {json_url}")
-
-        resp = requests.get(json_url, headers=headers, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
-
-        # Reddit returns a list for subreddit listings
-        listing = data if isinstance(data, dict) else data[0] if isinstance(data, list) else None
-        if not listing or "data" not in listing:
-            return {"success": False, "articles": [], "pages_crawled": 0,
-                    "duration": time.time() - start_time, "error": "Unexpected Reddit JSON structure"}
-
-        children = listing["data"].get("children", [])
         if debug:
-            logger.info(f"  [DEBUG] Reddit returned {len(children)} posts")
+            logger.info(f"  [DEBUG] Reddit RSS URL: {rss_url}")
 
-        for child in children[:max_pages]:
-            post = child.get("data", {})
-            if post.get("stickied"):
-                continue
+        resp = requests.get(
+            rss_url,
+            headers={"User-Agent": "pco-newsletter-crawler/1.0 (newsletter aggregation)"},
+            timeout=15,
+        )
+        resp.raise_for_status()
 
-            title = post.get("title", "")
-            permalink = post.get("permalink", "")
-            selftext = post.get("selftext", "")
-            post_url = f"https://www.reddit.com{permalink}" if permalink else post.get("url", "")
-            created_utc = post.get("created_utc")
+        # Parse Atom XML feed
+        ns = {"atom": "http://www.w3.org/2005/Atom"}
+        root = ET.fromstring(resp.text)
+        entries = root.findall("atom:entry", ns)
 
-            # Check minimum content
-            word_count = len(selftext.split()) if selftext else 0
-            if word_count < min_words and not post.get("url", "").startswith("http"):
+        if debug:
+            logger.info(f"  [DEBUG] Reddit RSS returned {len(entries)} entries")
+
+        for entry in entries[:max_pages]:
+            title = entry.findtext("atom:title", "", ns).strip()
+            link_el = entry.find("atom:link", ns)
+            post_url = link_el.get("href", "") if link_el is not None else ""
+            updated = entry.findtext("atom:updated", "", ns)
+
+            # Extract text content from HTML content element
+            content_html = entry.findtext("atom:content", "", ns)
+            # Strip HTML tags for a rough plaintext version
+            content_text = re.sub(r'<[^>]+>', ' ', content_html)
+            content_text = re.sub(r'\s+', ' ', content_text).strip()
+
+            # Parse date
+            article_date = None
+            if updated:
+                try:
+                    dt = datetime.fromisoformat(updated.replace("Z", "+00:00"))
+                    article_date = dt.strftime('%Y-%m-%d')
+                except (ValueError, TypeError):
+                    pass
+
+            # Check minimum content length
+            word_count = len(content_text.split()) if content_text else 0
+            if word_count < min_words:
                 if debug:
                     logger.info(f"  [DEBUG] Skipping short post: {title[:50]} ({word_count} words)")
                 continue
 
-            # Use selftext as markdown content for summary
-            article_date = None
-            if created_utc:
-                article_date = datetime.utcfromtimestamp(created_utc).strftime('%Y-%m-%d')
-
-            summary = generate_ai_summary(anthropic_client, selftext, title) if selftext else f"Reddit post: {title}"
+            summary = generate_ai_summary(anthropic_client, content_text, title) if content_text else f"Reddit post: {title}"
 
             articles.append({
                 "title": title,
@@ -735,7 +703,7 @@ async def crawl_reddit(
         return {
             "success": True,
             "articles": articles,
-            "pages_crawled": len(children),
+            "pages_crawled": len(entries),
             "duration": duration,
             "error": None,
         }
@@ -969,11 +937,17 @@ async def crawl_source(
         )
 
         # Build CrawlerRunConfig with per-source overrides from Crawl Config
+        pruning_threshold = crawl_config.get("pruning_threshold", 0.4)
+        if pruning_threshold > 0:
+            md_generator = DefaultMarkdownGenerator(
+                content_filter=PruningContentFilter(threshold=pruning_threshold)
+            )
+        else:
+            md_generator = DefaultMarkdownGenerator()
+
         run_config_kwargs = {
             "deep_crawl_strategy": deep_crawl_strategy,
-            "markdown_generator": DefaultMarkdownGenerator(
-                content_filter=PruningContentFilter(threshold=0.4)
-            ),
+            "markdown_generator": md_generator,
             "excluded_tags": ['nav', 'footer', 'aside', 'header'],
             "remove_overlay_elements": True,
             "process_iframes": False,
