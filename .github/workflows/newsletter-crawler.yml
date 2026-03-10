@@ -18,6 +18,11 @@ on:
         required: false
         default: false
         type: boolean
+      debug:
+        description: 'Enable verbose debug logging'
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   crawl:
@@ -59,6 +64,10 @@ jobs:
 
           if [ "${{ github.event.inputs.dry_run }}" == "true" ]; then
             CMD="$CMD --dry-run"
+          fi
+
+          if [ "${{ github.event.inputs.debug }}" == "true" ]; then
+            CMD="$CMD --debug"
           fi
 
           echo "Running: $CMD"
