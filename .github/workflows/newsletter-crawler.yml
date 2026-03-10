@@ -76,7 +76,7 @@ jobs:
           fi
 
           if [ -n "${{ github.event.inputs.source }}" ]; then
-            CMD="$CMD --source '${{ github.event.inputs.source }}'"
+            CMD="$CMD --source ${{ github.event.inputs.source }}"
           fi
 
           echo "Running: $CMD"
