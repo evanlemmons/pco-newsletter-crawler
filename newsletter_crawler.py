@@ -29,7 +29,7 @@ import time
 import logging
 import requests
 import xml.etree.ElementTree as ET
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from fnmatch import fnmatch
 from typing import Optional
 from urllib.parse import urlparse
@@ -146,7 +146,7 @@ def get_frequencies_for_today() -> list[str]:
     
     - Daily: every day
     - Weekly: Mondays (weekday 0)
-    - Monthly: 1st of month
+    - Monthly: last Monday of the month (before the 1st-of-month summary)
     - Quarterly: 1st of Jan, Apr, Jul, Oct
     """
     today = date.today()
@@ -156,8 +156,8 @@ def get_frequencies_for_today() -> list[str]:
     if today.weekday() == 0:
         frequencies.append("Weekly")
     
-    # Monthly on 1st
-    if today.day == 1:
+    # Monthly on the last Monday of the month (so data is fresh for the 1st-of-month summary)
+    if today.weekday() == 0 and (today + timedelta(days=7)).month != today.month:
         frequencies.append("Monthly")
     
     # Quarterly on 1st of Jan, Apr, Jul, Oct
