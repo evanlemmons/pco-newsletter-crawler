@@ -21,6 +21,7 @@ Usage:
 
 import asyncio
 import argparse
+import calendar
 import json
 import os
 import sys
@@ -29,7 +30,7 @@ import time
 import logging
 import requests
 import xml.etree.ElementTree as ET
-from datetime import datetime, date, timedelta
+from datetime import datetime, date
 from fnmatch import fnmatch
 from typing import Optional
 from urllib.parse import urlparse
@@ -140,13 +141,22 @@ def query_data_source(notion: Client, data_source_id: str, filter_query=None, st
 # FREQUENCY LOGIC
 # ============================================================================
 
+def is_last_monday_of_month(today):
+    """Return True if today is the last Monday of its month."""
+    last_day = calendar.monthrange(today.year, today.month)[1]
+    for d in range(last_day, last_day - 7, -1):
+        if date(today.year, today.month, d).weekday() == 0:
+            return today.day == d
+    return False
+
+
 def get_frequencies_for_today() -> list[str]:
     """
     Determine which check frequencies should run today.
     
     - Daily: every day
     - Weekly: Mondays (weekday 0)
-    - Monthly: last Monday of the month (before the 1st-of-month summary)
+    - Monthly: last Monday of the month (so data is fresh for the 1st-of-month summary)
     - Quarterly: 1st of Jan, Apr, Jul, Oct
     """
     today = date.today()
@@ -156,8 +166,8 @@ def get_frequencies_for_today() -> list[str]:
     if today.weekday() == 0:
         frequencies.append("Weekly")
     
-    # Monthly on the last Monday of the month (so data is fresh for the 1st-of-month summary)
-    if today.weekday() == 0 and (today + timedelta(days=7)).month != today.month:
+    # Monthly on the last Monday of the month
+    if is_last_monday_of_month(today):
         frequencies.append("Monthly")
     
     # Quarterly on 1st of Jan, Apr, Jul, Oct
