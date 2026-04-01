@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-monthly_summary.py - Generate monthly trend analysis from Newsletter Pipeline
+monthly_summary.py - Generate monthly Industry Trend Report from Newsletter Pipeline
 
 This script:
 1. Queries the past 30 days of articles from Newsletter Pipeline
-2. Generates a strategic trend analysis using Claude Sonnet
-3. Creates a Monthly Summary entry in Notion
+2. Generates a strategic trend analysis using Claude Opus (per-section calls)
+3. Creates an Industry Trend Report entry in Notion
 4. Posts notification to Slack with headline and link
 
 Environment variables required:
@@ -759,7 +759,7 @@ def post_to_slack(
             "type": "header",
             "text": {
                 "type": "plain_text",
-                "text": f"📣 Monthly Summary - {month_name}",
+                "text": f"📣 Industry Trend Report - {month_name}",
                 "emoji": True
             }
         },
@@ -786,7 +786,7 @@ def post_to_slack(
                     "type": "button",
                     "text": {
                         "type": "plain_text",
-                        "text": "Read Full Summary",
+                        "text": "Read Full Report",
                         "emoji": True
                     },
                     "url": notion_url,
@@ -798,7 +798,7 @@ def post_to_slack(
 
     payload = {
         "blocks": blocks,
-        "text": f"Monthly Summary - {month_name}: {headline}"  # Fallback for notifications
+        "text": f"Industry Trend Report - {month_name}: {headline}"  # Fallback for notifications
     }
 
     try:
