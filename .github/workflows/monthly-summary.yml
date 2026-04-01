@@ -18,6 +18,11 @@ on:
         required: false
         default: '30'
         type: string
+      no_slack:
+        description: 'Skip Slack notification'
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   summarize:
@@ -43,7 +48,7 @@ jobs:
         env:
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_URL: ${{ github.event.inputs.no_slack == 'true' && '' || secrets.SLACK_WEBHOOK_URL }}
         run: |
           CMD="python monthly_summary.py"
 
