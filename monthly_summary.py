@@ -633,204 +633,134 @@ def generate_monthly_summary(
 # NOTION OUTPUT
 # ============================================================================
 
+def _inline_to_rich_text(children) -> list[dict]:
+    """
+    Convert markdown-it-py inline token children to a Notion rich_text array.
+    Handles bold, italic, links, and plain text correctly via state machine.
+    """
+    rich_text = []
+    bold = False
+    italic = False
+    current_link = None
+
+    for child in (children or []):
+        if child.type == 'strong_open':
+            bold = True
+        elif child.type == 'strong_close':
+            bold = False
+        elif child.type == 'em_open':
+            italic = True
+        elif child.type == 'em_close':
+            italic = False
+        elif child.type == 'link_open':
+            attrs = child.attrs or {}
+            current_link = attrs.get('href', '') if isinstance(attrs, dict) else next(
+                (v for k, v in attrs if k == 'href'), None
+            )
+        elif child.type == 'link_close':
+            current_link = None
+        elif child.type in ('text', 'softbreak', 'hardbreak'):
+            content = ' ' if child.type in ('softbreak', 'hardbreak') else child.content
+            if not content:
+                continue
+            entry = {"type": "text", "text": {"content": content}}
+            if current_link:
+                entry["text"]["link"] = {"url": current_link}
+            annotations = {}
+            if bold:
+                annotations["bold"] = True
+            if italic:
+                annotations["italic"] = True
+            if annotations:
+                entry["annotations"] = annotations
+            rich_text.append(entry)
+        elif child.type == 'code_inline':
+            rich_text.append({
+                "type": "text",
+                "text": {"content": child.content},
+                "annotations": {"code": True}
+            })
+
+    return rich_text if rich_text else [{"type": "text", "text": {"content": ""}}]
+
+
 def markdown_to_notion_blocks(markdown_text: str) -> list[dict]:
     """
-    Convert markdown text to Notion blocks.
-    Handles headers, paragraphs, bullet points, links, and callouts (blockquotes).
+    Convert markdown text to Notion blocks using markdown-it-py.
+    Handles headings, paragraphs, bullet lists, blockquotes (callouts), and dividers.
     """
-    import re
+    from markdown_it import MarkdownIt
+    md = MarkdownIt()
+    tokens = md.parse(markdown_text)
+
     blocks = []
-    lines = markdown_text.split('\n')
     i = 0
 
-    while i < len(lines):
-        line = lines[i]
-
-        # Skip empty lines
-        if not line.strip():
-            i += 1
-            continue
+    while i < len(tokens):
+        token = tokens[i]
 
         # Horizontal rule → Notion divider
-        if line.strip() == '---':
+        if token.type == 'hr':
             blocks.append({"object": "block", "type": "divider", "divider": {}})
             i += 1
-            continue
 
-        # Blockquote / Callout (lines starting with >)
-        if line.strip().startswith('>'):
-            # Collect all consecutive blockquote lines
-            callout_lines = []
-            while i < len(lines) and lines[i].strip().startswith('>'):
-                # Remove the > prefix and any leading space
-                content = lines[i].strip()[1:].strip()
-                callout_lines.append(content)
-                i += 1
+        # Headings: heading_open / inline / heading_close
+        elif token.type == 'heading_open':
+            notion_type = {'h1': 'heading_1', 'h2': 'heading_2', 'h3': 'heading_3'}.get(token.tag, 'heading_2')
+            rich_text = _inline_to_rich_text(tokens[i + 1].children)
+            blocks.append({"object": "block", "type": notion_type, notion_type: {"rich_text": rich_text}})
+            i += 3  # open, inline, close
 
-            callout_text = ' '.join(callout_lines)
+        # Paragraphs: paragraph_open / inline / paragraph_close
+        elif token.type == 'paragraph_open':
+            rich_text = _inline_to_rich_text(tokens[i + 1].children)
+            blocks.append({"object": "block", "type": "paragraph", "paragraph": {"rich_text": rich_text}})
+            i += 3
 
+        # Bullet lists
+        elif token.type == 'bullet_list_open':
+            i += 1  # skip list_open
+            while i < len(tokens) and tokens[i].type != 'bullet_list_close':
+                t = tokens[i]
+                if t.type == 'list_item_open':
+                    i += 1
+                elif t.type == 'paragraph_open':
+                    # Loose list: list item wraps content in a paragraph
+                    rich_text = _inline_to_rich_text(tokens[i + 1].children)
+                    blocks.append({"object": "block", "type": "bulleted_list_item",
+                                   "bulleted_list_item": {"rich_text": rich_text}})
+                    i += 3
+                elif t.type == 'inline':
+                    # Tight list: inline content directly inside list item
+                    rich_text = _inline_to_rich_text(t.children)
+                    blocks.append({"object": "block", "type": "bulleted_list_item",
+                                   "bulleted_list_item": {"rich_text": rich_text}})
+                    i += 1
+                else:
+                    i += 1  # list_item_close or nested list
+            i += 1  # skip list_close
+
+        # Blockquotes → Notion callout blocks
+        elif token.type == 'blockquote_open':
+            all_rich_text = []
+            i += 1
+            while i < len(tokens) and tokens[i].type != 'blockquote_close':
+                if tokens[i].type == 'paragraph_open':
+                    all_rich_text.extend(_inline_to_rich_text(tokens[i + 1].children))
+                    i += 3
+                else:
+                    i += 1
+            i += 1  # skip blockquote_close
             blocks.append({
                 "object": "block",
                 "type": "callout",
-                "callout": {
-                    "rich_text": parse_inline_markdown(callout_text),
-                    "color": "blue_background"
-                }
+                "callout": {"rich_text": all_rich_text, "color": "blue_background"}
             })
-            continue
 
-        # H1 header
-        if line.startswith('# '):
-            blocks.append({
-                "object": "block",
-                "type": "heading_1",
-                "heading_1": {
-                    "rich_text": parse_inline_markdown(line[2:].strip())
-                }
-            })
-        # H2 header
-        elif line.startswith('## '):
-            blocks.append({
-                "object": "block",
-                "type": "heading_2",
-                "heading_2": {
-                    "rich_text": parse_inline_markdown(line[3:].strip())
-                }
-            })
-        # H3 header
-        elif line.startswith('### '):
-            blocks.append({
-                "object": "block",
-                "type": "heading_3",
-                "heading_3": {
-                    "rich_text": parse_inline_markdown(line[4:].strip())
-                }
-            })
-        # Bullet point
-        elif line.strip().startswith('- ') or line.strip().startswith('* '):
-            text = line.strip()[2:]
-            blocks.append({
-                "object": "block",
-                "type": "bulleted_list_item",
-                "bulleted_list_item": {
-                    "rich_text": parse_inline_markdown(text)
-                }
-            })
-        # Regular paragraph
         else:
-            # Collect consecutive non-header, non-bullet, non-blockquote lines into one paragraph
-            paragraph_lines = [line]
-            while i + 1 < len(lines):
-                next_line = lines[i + 1]
-                if (next_line.strip() and
-                    not next_line.startswith('#') and
-                    not next_line.strip().startswith('- ') and
-                    not next_line.strip().startswith('* ') and
-                    not next_line.strip().startswith('>')):
-                    paragraph_lines.append(next_line)
-                    i += 1
-                else:
-                    break
-
-            full_text = ' '.join(paragraph_lines)
-            if full_text.strip():
-                blocks.append({
-                    "object": "block",
-                    "type": "paragraph",
-                    "paragraph": {
-                        "rich_text": parse_inline_markdown(full_text)
-                    }
-                })
-
-        i += 1
+            i += 1
 
     return blocks
-
-
-def parse_inline_markdown(text: str) -> list[dict]:
-    """
-    Parse inline markdown (bold, links) into Notion rich_text array.
-    """
-    import re
-    rich_text = []
-
-    # Order matters: bold-link before bold before italic before link
-    pattern = r'(\*\*\[[^\]]+\]\([^)]+\)\*\*|\*\*[^*]+\*\*|\*[^*\n]+\*|_[^_\n]+_|\[[^\]]+\]\([^)]+\))'
-    parts = re.split(pattern, text)
-
-    for part in parts:
-        if not part:
-            continue
-
-        # Bold link: **[text](url)**
-        if part.startswith('**[') and part.endswith(')**'):
-            inner = part[2:-2]
-            match = re.match(r'\[([^\]]+)\]\(([^)]+)\)', inner)
-            if match:
-                link_text, url = match.groups()
-                rich_text.append({
-                    "type": "text",
-                    "text": {"content": link_text, "link": {"url": url}},
-                    "annotations": {"bold": True}
-                })
-        # Bold text: **text**
-        elif part.startswith('**') and part.endswith('**'):
-            rich_text.append({
-                "type": "text",
-                "text": {"content": part[2:-2]},
-                "annotations": {"bold": True}
-            })
-        # Italic text: *text* or _text_
-        elif (part.startswith('*') and part.endswith('*') and not part.startswith('**')) or \
-             (part.startswith('_') and part.endswith('_')):
-            rich_text.append({
-                "type": "text",
-                "text": {"content": part[1:-1]},
-                "annotations": {"italic": True}
-            })
-        # Link: [text](url)
-        elif part.startswith('[') and '](' in part:
-            match = re.match(r'\[([^\]]+)\]\(([^)]+)\)', part)
-            if match:
-                link_text, url = match.groups()
-                rich_text.append({
-                    "type": "text",
-                    "text": {"content": link_text, "link": {"url": url}}
-                })
-        # Plain text
-        else:
-            rich_text.append({
-                "type": "text",
-                "text": {"content": part}
-            })
-
-    return rich_text if rich_text else [{"type": "text", "text": {"content": text}}]
-
-
-def sanitize_newsletter(markdown_text: str) -> str:
-    """
-    Quick Claude pass to fix stray asterisks, broken formatting, and
-    any other markdown artifacts before writing to Notion.
-    """
-    import anthropic
-    client = anthropic.Anthropic()
-
-    message = client.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=8000,
-        messages=[{"role": "user", "content": f"""You are proofreading a markdown newsletter before it is published. Fix ONLY formatting issues — do not change any content, wording, or structure.
-
-Specifically fix:
-- Stray asterisks that weren't converted to bold or italic (e.g. a lone * or ** not wrapping any text)
-- Incomplete markdown links that show raw [text](url) syntax instead of being properly formatted
-- Any other broken markdown formatting artifacts
-
-Return the corrected markdown only, with zero commentary or explanation.
-
----
-{markdown_text}"""}]
-    )
-    return message.content[0].text.strip()
 
 
 def create_summary_entry(
@@ -847,10 +777,6 @@ def create_summary_entry(
     Returns page ID.
     """
     title = f"Industry Trend Report - {month_name}"
-
-    # Sanitize markdown before conversion
-    print("Sanitizing newsletter formatting...")
-    summary_text = sanitize_newsletter(summary_text)
 
     # Build header block prepended to the page body
     header_blocks = [

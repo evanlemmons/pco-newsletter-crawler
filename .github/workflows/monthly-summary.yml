@@ -42,7 +42,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install notion-client anthropic
+          pip install notion-client anthropic markdown-it-py
 
       - name: Run monthly summary
         env:
