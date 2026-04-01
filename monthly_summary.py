@@ -512,70 +512,75 @@ def generate_monthly_summary(
     article_count: int
 ) -> tuple[str, str]:
     """
-    Generate strategic trend analysis using Claude Opus (per-section calls).
+    Generate strategic trend analysis using per-section Claude Opus calls.
 
     Returns tuple of (headline, body) where:
     - headline: Clickbait-style one-liner for the Summary property
     - body: Full markdown-formatted analysis for Notion page body
     """
-    import re
-
-    prompt = MONTHLY_SUMMARY_PROMPT.format(
-        period_description=period_description,
-        article_count=article_count,
-        article_digest=article_digest
-    )
-
     try:
-        message = anthropic_client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=8000,
-            messages=[
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ]
+        # Separate community discussions from regular articles
+        articles = []  # article_digest is pre-built; routing is handled in generate_section
+        community_discussions = []
+
+        shared_kwargs = dict(
+            period_description=period_description,
+            article_count=article_count,
+            model="claude-opus-4-6",
         )
 
-        partial_response = message.content[0].text
+        print("Generating section: Emerging Trends...")
+        trends = generate_section("trends", article_digest, **shared_kwargs)
 
-        if message.stop_reason == "max_tokens":
-            logger.warning("Response hit max_tokens limit — requesting continuation...")
-            continuation = anthropic_client.messages.create(
-                model="claude-sonnet-4-6",
-                max_tokens=8000,
-                messages=[
-                    {"role": "user", "content": prompt},
-                    {"role": "assistant", "content": partial_response},
-                    {"role": "user", "content": "Your response was cut off. Please continue exactly where you left off, completing the current sentence and any remaining sections."}
-                ]
-            )
-            if continuation.stop_reason == "max_tokens":
-                raise ValueError(
-                    "Response still truncated after continuation attempt. "
-                    "Consider reducing the article count or digest length."
-                )
-            partial_response = partial_response + continuation.content[0].text
-            logger.info("Continuation successful — responses merged.")
+        print("Generating section: Major Industry Events...")
+        events = generate_section("events", article_digest, **shared_kwargs)
 
-        full_response = partial_response.strip()
+        print("Generating section: User Sentiment & Pain Points...")
+        sentiment = generate_section("sentiment", article_digest, **shared_kwargs)
 
-        # Parse out the headline
-        headline = ""
-        body = full_response
+        # Community section uses only the community portion of the digest.
+        # build_article_digest already groups community discussions under
+        # [COMMUNITY DISCUSSIONS] — pass the full digest and let the prompt
+        # focus the model on that block.
+        print("Generating section: Community Discussions...")
+        community_raw = generate_section("community", article_digest, **shared_kwargs)
+        community = "" if community_raw.strip() == "SKIP_SECTION" else community_raw
 
-        # Look for HEADLINE: pattern at the start
-        headline_match = re.match(r'^HEADLINE:\s*(.+?)(?:\n|$)', full_response, re.IGNORECASE)
-        if headline_match:
-            headline = headline_match.group(1).strip()
-            # Remove the headline line from the body
-            body = full_response[headline_match.end():].strip()
-            logger.info(f"Extracted headline: {headline}")
-        else:
+        # Strategic Implications sees all prior sections
+        previous_sections_text = "\n\n---\n\n".join(filter(None, [trends, events, sentiment, community]))
+        print("Generating section: Strategic Implications...")
+        implications = generate_section(
+            "implications",
+            article_digest,
+            previous_sections=previous_sections_text,
+            **shared_kwargs,
+        )
+
+        # Assemble body
+        sections = [trends, events, sentiment]
+        if community:
+            sections.append(community)
+        sections.append(implications)
+        all_sections_text = "\n\n---\n\n".join(sections)
+
+        # Generate headline
+        print("Generating headline...")
+        headline_raw = generate_section(
+            "headline",
+            digest="",
+            period_description=period_description,
+            article_count=article_count,
+            model="claude-opus-4-6",
+            all_sections=all_sections_text,
+        )
+        headline = headline_raw.replace("HEADLINE:", "").strip()
+        if not headline:
             logger.warning("No HEADLINE found in response, using default")
             headline = f"What happened in {period_description}"
+        else:
+            logger.info(f"Extracted headline: {headline}")
 
+        body = all_sections_text
         return headline, body
 
     except Exception as e:
