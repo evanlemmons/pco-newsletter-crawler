@@ -403,7 +403,7 @@ def generate_monthly_summary(
     try:
         message = anthropic_client.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=4000,
+            max_tokens=8000,
             messages=[
                 {
                     "role": "user",
@@ -412,7 +412,28 @@ def generate_monthly_summary(
             ]
         )
 
-        full_response = message.content[0].text.strip()
+        partial_response = message.content[0].text
+
+        if message.stop_reason == "max_tokens":
+            logger.warning("Response hit max_tokens limit — requesting continuation...")
+            continuation = anthropic_client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=8000,
+                messages=[
+                    {"role": "user", "content": prompt},
+                    {"role": "assistant", "content": partial_response},
+                    {"role": "user", "content": "Your response was cut off. Please continue exactly where you left off, completing the current sentence and any remaining sections."}
+                ]
+            )
+            if continuation.stop_reason == "max_tokens":
+                raise ValueError(
+                    "Response still truncated after continuation attempt. "
+                    "Consider reducing the article count or digest length."
+                )
+            partial_response = partial_response + continuation.content[0].text
+            logger.info("Continuation successful — responses merged.")
+
+        full_response = partial_response.strip()
 
         # Parse out the headline
         headline = ""
