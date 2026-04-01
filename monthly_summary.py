@@ -394,9 +394,9 @@ Identify patterns where multiple sources discuss the same topic. Only include ge
 Start with this exact format:
 ## 📈 Emerging Trends
 
-> **TL;DR:** [One short paragraph with the 1-3 most important trend signals, including markdown links]
+> **TL;DR:** [2 sentences max — the 1-3 most important trend signals, including markdown links]
 
-Then write the detailed section (3-5 paragraphs max). Use markdown links: [Title](url). Be selective and concise — quality over quantity. Do not include any other section headers.""",
+Then write the detailed section. Use ### subheadings and - bullet points to organize the content. Use markdown links: [Title](url). Be selective and concise — quality over quantity. Do not use # or ## headers.""",
 
     "events": """Write ONLY the ## 🏢 Major Industry Events section of the newsletter.
 
@@ -405,9 +405,9 @@ Cover significant events impacting Planning Center: direct mentions of "Planning
 Start with this exact format:
 ## 🏢 Major Industry Events
 
-> **TL;DR:** [One short paragraph with the 1-2 most important events, including markdown links]
+> **TL;DR:** [2 sentences max — the 1-2 most important events, including markdown links]
 
-Then write the detailed section. Use markdown links: [Title](url). If truly nothing noteworthy happened, write: "## 🏢 Major Industry Events\\n\\nNothing significant to report this month." Do not include any other section headers.""",
+Then write the detailed section. Use ### subheadings and - bullet points to organize the content. Use markdown links: [Title](url). If truly nothing noteworthy happened, write: "## 🏢 Major Industry Events\\n\\nNothing significant to report this month." Do not use # or ## headers.""",
 
     "sentiment": """Write ONLY the ## 💬 User Sentiment & Pain Points section of the newsletter.
 
@@ -416,9 +416,9 @@ Focus on what church leaders and administrators are talking about — pain point
 Start with this exact format:
 ## 💬 User Sentiment & Pain Points
 
-> **TL;DR:** [One short paragraph with the 1-2 most actionable pain points, including markdown links]
+> **TL;DR:** [2 sentences max — the 1-2 most actionable pain points, including markdown links]
 
-Then write the detailed section. Use markdown links: [Title](url). Do not include any other section headers.""",
+Then write the detailed section. Use ### subheadings and - bullet points to organize the content. Use markdown links: [Title](url). Do not use # or ## headers.""",
 
     "community": """Write ONLY the ## 💭 Community Discussions section of the newsletter.
 
@@ -431,9 +431,9 @@ If the entries don't contain substantial unique insights, output exactly: SKIP_S
 Otherwise start with this exact format:
 ## 💭 Community Discussions
 
-> **TL;DR:** [One short paragraph with the 1-2 most important community signals, including markdown links to specific conversations]
+> **TL;DR:** [2 sentences max — the 1-2 most important community signals, including markdown links to specific conversations]
 
-Then write the detailed section with inline conversation links. Do not include any other section headers.""",
+Then write the detailed section. Use ### subheadings for each major theme and - bullet points for sub-points. Cite conversation URLs inline as markdown links. Do not use # or ## headers.""",
 
     "implications": """Write ONLY the ## 🎯 Strategic Implications section of the newsletter.
 
@@ -444,9 +444,9 @@ You are given the other four sections of this month's newsletter as context. You
 Start with this exact format:
 ## 🎯 Strategic Implications
 
-> **TL;DR:** [One short paragraph with the 2-3 most important strategic takeaways, including markdown links]
+> **TL;DR:** [2 sentences max — the 2-3 most important strategic takeaways, including markdown links]
 
-Then write the detailed section (3-5 bullets or short paragraphs). Be specific and actionable. Do not include any other section headers.""",
+Then write 3-5 bullet points (- ) that are specific and actionable. Do not use # or ## headers.""",
 
     "headline": """Based on this month's newsletter sections below, write a single clickbait headline.
 
@@ -607,6 +607,12 @@ def markdown_to_notion_blocks(markdown_text: str) -> list[dict]:
 
         # Skip empty lines
         if not line.strip():
+            i += 1
+            continue
+
+        # Horizontal rule → Notion divider
+        if line.strip() == '---':
+            blocks.append({"object": "block", "type": "divider", "divider": {}})
             i += 1
             continue
 
