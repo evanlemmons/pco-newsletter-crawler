@@ -162,10 +162,13 @@ def query_recent_articles(notion: Client, start_date: date, end_date: date) -> l
             # Extract URL
             url = props.get("URL", {}).get("url", "")
 
-            # Extract summary
+            # Extract summary (may be stored across multiple rich_text chunks)
             summary = ""
             if props.get("Summary", {}).get("rich_text"):
-                summary = props["Summary"]["rich_text"][0]["plain_text"] if props["Summary"]["rich_text"] else ""
+                summary = "".join(
+                    chunk.get("plain_text", chunk.get("text", {}).get("content", ""))
+                    for chunk in props["Summary"]["rich_text"]
+                )
 
             # Extract topics (multi-select)
             topics = []
@@ -219,9 +222,9 @@ def group_articles_by_topic(articles: list[dict]) -> dict[str, list]:
     return dict(grouped)
 
 
-def build_article_digest(articles: list[dict], max_chars_per_article: int = 300) -> str:
+def build_article_digest(articles: list[dict]) -> str:
     """
-    Build a condensed digest of all articles for Claude input.
+    Build a digest of all articles for Claude input.
     Includes URLs so Claude can cite sources in the output.
 
     Separates Community Discussion entries from regular Articles.
@@ -229,7 +232,7 @@ def build_article_digest(articles: list[dict], max_chars_per_article: int = 300)
     Format:
     [ARTICLES BY TOPIC]
     [AI/ML - 15 articles]
-    - "Article Title" (URL) - Summary truncated...
+    - "Article Title" (URL) - Summary...
 
     [COMMUNITY DISCUSSIONS]
     - "Discussion Title" (URL) - Summary...
@@ -252,12 +255,7 @@ def build_article_digest(articles: list[dict], max_chars_per_article: int = 300)
             for article in topic_articles:
                 title = article["title"][:100] if article["title"] else "(No title)"
                 url = article["url"] or ""
-
-                # Truncate summary but keep more detail
                 summary = article["summary"] or "(No summary)"
-                if len(summary) > max_chars_per_article:
-                    summary = summary[:max_chars_per_article].rsplit(' ', 1)[0] + "..."
-
                 lines.append(f'- "{title}" ({url}) - {summary}')
 
     # Process community discussions separately
@@ -266,12 +264,7 @@ def build_article_digest(articles: list[dict], max_chars_per_article: int = 300)
         for discussion in community_discussions:
             title = discussion["title"][:100] if discussion["title"] else "(No title)"
             url = discussion["url"] or ""
-
-            # Truncate summary but keep more detail
             summary = discussion["summary"] or "(No summary)"
-            if len(summary) > max_chars_per_article:
-                summary = summary[:max_chars_per_article].rsplit(' ', 1)[0] + "..."
-
             lines.append(f'- "{title}" ({url}) - {summary}')
 
     return "\n".join(lines)
