@@ -67,13 +67,12 @@ except ImportError:
     sys.exit(1)
 
 
-def get_anthropic_client():
-    """Initialize Anthropic client with API key from environment."""
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
+def check_anthropic_key():
+    """Verify ANTHROPIC_API_KEY is set before starting generation."""
+    if not os.environ.get("ANTHROPIC_API_KEY"):
         logger.error("ANTHROPIC_API_KEY not set. Cannot generate summary.")
-        return None
-    return anthropic.Anthropic(api_key=api_key)
+        return False
+    return True
 
 
 def get_notion_client() -> Client:
@@ -274,104 +273,6 @@ def build_article_digest(articles: list[dict]) -> str:
 # CLAUDE INTEGRATION
 # ============================================================================
 
-MONTHLY_SUMMARY_PROMPT = """You are a strategic analyst for Planning Center, a company that builds church management software used by thousands of churches. Your task is to write a monthly trend report based on articles from our industry monitoring. This should read like a polished internal newsletter for our product team.
-
-FIRST, OUTPUT A CLICKBAIT HEADLINE:
-Before the main report, output a single catchy, clickbait-style, semi-humorous one-liner that captures the month's most interesting theme or finding. This will be used as a teaser summary.
-
-Format it exactly like this on its own line:
-HEADLINE: [Your snappy one-liner here]
-
-Examples of good headlines:
-- HEADLINE: AI is coming for your church bulletin, and pastors are surprisingly okay with it
-- HEADLINE: Three ChMS vendors walk into a merger, only two walk out
-- HEADLINE: Turns out churches DO want online giving—who knew?
-- HEADLINE: The great volunteer shortage of 2026 is real, and it's spectacular
-
-The headline should be:
-- One sentence, under 100 characters ideally
-- Slightly irreverent but still professional
-- Reference a specific finding from this month's articles
-- Make someone want to read more
-
-After the headline, continue with the full report below.
-
-CONTEXT:
-- Planning Center builds tools for church operations: check-in, giving, groups, people management, services planning
-- Our users are church administrators, pastors, and volunteers
-- We monitor industry news, competitor activity, and user discussions to inform product decisions
-
-ANALYSIS PERIOD: {period_description}
-TOTAL ARTICLES ANALYZED: {article_count}
-
-ARTICLE DIGEST (includes URLs for citation):
-{article_digest}
-
-CRITICAL: BE SELECTIVE, NOT COMPREHENSIVE
-
-You are NOT expected to mention every article. Most articles in the digest are routine industry content that doesn't warrant inclusion. Your job is to identify and highlight ONLY the articles that:
-
-1. Represent genuine strategic signals (not just marketing fluff or generic advice)
-2. Indicate real industry shifts or competitive threats
-3. Contain specific data, announcements, or insights that could inform product decisions
-4. Show patterns when multiple sources discuss the same emerging issue
-
-SKIP articles that are:
-- Generic "how-to" content or best practices advice
-- Marketing pieces without substantive news
-- Repetitive coverage of the same topic (cite the best source, not all of them)
-- Tangentially related but not actionable for Planning Center
-
-If only 5-10 articles out of {article_count} are truly worth highlighting, that's fine. Quality over quantity.
-
-Write a trend report with these section headers (including emojis):
-
-## 📈 Emerging Trends
-
-## 🏢 Major Industry Events
-
-## 💬 User Sentiment & Pain Points
-
-## 💭 Community Discussions
-[ONLY include this section if there are Community Discussion entries in the digest AND they contain substantial insights worth highlighting. If community discussions are trivial or redundant with other sections, skip this section entirely.]
-
-## 🎯 Strategic Implications
-
-SECTION CONTENT REQUIREMENTS:
-
-**📈 Emerging Trends**: Identify patterns where multiple sources discuss the same topic or theme. Only include if there's a genuine trend worth noting - not just because articles exist on a topic.
-
-**🏢 Major Industry Events**: Cover significant events that would impact Planning Center - mentions of "Planning Center" specifically, acquisitions, mergers, partnerships, new product launches from competitors, new technologies being adopted by churches. If nothing major happened, say so briefly and move on.
-
-**💬 User Sentiment & Pain Points**: What are church leaders and administrators talking about? Focus on pain points that Planning Center could address or should be aware of. Skip generic complaints.
-
-**💭 Community Discussions**: [CONDITIONAL SECTION] If the digest includes Community Discussion entries with substantial insights, create this section to highlight key themes, pain points, or feature requests from the Planning Center community. This section should focus on direct user feedback and discussions that differ from external industry content. Do NOT duplicate information that's already covered in other sections. If community discussions don't add unique value beyond what's in other sections, omit this section entirely.
-
-**🎯 Strategic Implications**: Conclude with actionable insights for the product team. What should we pay attention to? What opportunities or threats are emerging? Be specific and tie back to the most important findings.
-
-CRITICAL FORMATTING REQUIREMENT - TL;DR CALLOUTS:
-Immediately after EACH section header (## emoji Title), include a TL;DR callout block using this exact format:
-
-> **TL;DR:** [One short paragraph summarizing the 1-3 most important/impactful points from this section, including markdown links to the key articles]
-
-Example:
-## 📈 Emerging Trends
-
-> **TL;DR:** AI adoption in churches has shifted from theoretical to practical, with [Barna research](url) showing 77% of pastors believe God can use AI. Meanwhile, the [Vanco-ACS merger](url) signals major consolidation in church software.
-
-[Then continue with the full detailed section content...]
-
-ADDITIONAL FORMATTING RULES:
-- Use markdown formatting for readability (headers, bold, bullet points)
-- Include URLs as markdown links: [Article Title](url)
-- Write in a professional but accessible tone
-- Be concise - a shorter, focused report is better than a long comprehensive one
-- If a section has nothing noteworthy, include a brief "Nothing significant to report this month" and move on
-- The TL;DR callouts are REQUIRED for each section
-
-Begin your trend report:"""
-
-
 SECTION_SYSTEM_CONTEXT = """You are a strategic analyst for Planning Center, a company that builds church management software used by thousands of churches. You are writing one section of a monthly internal trend newsletter for the product team.
 
 CONTEXT:
@@ -547,7 +448,6 @@ def generate_section(
 
 
 def generate_monthly_summary(
-    anthropic_client,
     article_digest: str,
     period_description: str,
     article_count: int
@@ -560,10 +460,6 @@ def generate_monthly_summary(
     - body: Full markdown-formatted analysis for Notion page body
     """
     try:
-        # Separate community discussions from regular articles
-        articles = []  # article_digest is pre-built; routing is handled in generate_section
-        community_discussions = []
-
         shared_kwargs = dict(
             period_description=period_description,
             article_count=article_count,
@@ -973,10 +869,8 @@ def main(days_back: int = None, dry_run: bool = False):
 
     # Initialize clients
     notion = get_notion_client()
-    anthropic_client = get_anthropic_client()
-
-    if not anthropic_client:
-        logger.error("Cannot proceed without Anthropic client")
+    if not check_anthropic_key():
+        logger.error("Cannot proceed without Anthropic API key")
         sys.exit(1)
 
     # Query recent articles and community discussions
@@ -1015,9 +909,8 @@ def main(days_back: int = None, dry_run: bool = False):
         return
 
     # Generate summary with Claude
-    logger.info("Generating trend analysis with Claude Sonnet...")
+    logger.info("Generating trend analysis with Claude Opus (per-section)...")
     headline, summary = generate_monthly_summary(
-        anthropic_client,
         article_digest,
         period_description,
         len(articles)
