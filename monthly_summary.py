@@ -772,15 +772,25 @@ def create_summary_entry(
         "Summary": {"rich_text": [{"text": {"content": headline}}]},
     }
 
+    # Notion API caps children at 100 per request — create with first batch,
+    # then append remaining blocks in chunks.
+    BATCH_SIZE = 100
     response = notion.pages.create(
         parent={"database_id": NEWSLETTER_PIPELINE_DB},
         icon={"type": "emoji", "emoji": "📣"},
         properties=properties,
-        children=content_blocks
+        children=content_blocks[:BATCH_SIZE]
     )
+    page_id = response["id"]
+
+    for i in range(BATCH_SIZE, len(content_blocks), BATCH_SIZE):
+        notion.blocks.children.append(
+            block_id=page_id,
+            children=content_blocks[i:i + BATCH_SIZE]
+        )
 
     logger.info(f"Created Monthly Summary entry: {title}")
-    return response["id"], response["url"]
+    return page_id, response["url"]
 
 
 # ============================================================================
