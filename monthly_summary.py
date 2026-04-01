@@ -754,9 +754,8 @@ def parse_inline_markdown(text: str) -> list[dict]:
     import re
     rich_text = []
 
-    # Pattern to match: bold links **[text](url)**, plain links [text](url), bold **text**
-    # Bold links must come first — otherwise the bold pattern swallows the link syntax
-    pattern = r'(\*\*\[[^\]]+\]\([^)]+\)\*\*|\*\*[^*]+\*\*|\[[^\]]+\]\([^)]+\))'
+    # Order matters: bold-link before bold before italic before link
+    pattern = r'(\*\*\[[^\]]+\]\([^)]+\)\*\*|\*\*[^*]+\*\*|\*[^*\n]+\*|_[^_\n]+_|\[[^\]]+\]\([^)]+\))'
     parts = re.split(pattern, text)
 
     for part in parts:
@@ -765,7 +764,7 @@ def parse_inline_markdown(text: str) -> list[dict]:
 
         # Bold link: **[text](url)**
         if part.startswith('**[') and part.endswith(')**'):
-            inner = part[2:-2]  # strip surrounding **
+            inner = part[2:-2]
             match = re.match(r'\[([^\]]+)\]\(([^)]+)\)', inner)
             if match:
                 link_text, url = match.groups()
@@ -774,14 +773,22 @@ def parse_inline_markdown(text: str) -> list[dict]:
                     "text": {"content": link_text, "link": {"url": url}},
                     "annotations": {"bold": True}
                 })
-        # Bold text
+        # Bold text: **text**
         elif part.startswith('**') and part.endswith('**'):
             rich_text.append({
                 "type": "text",
                 "text": {"content": part[2:-2]},
                 "annotations": {"bold": True}
             })
-        # Link
+        # Italic text: *text* or _text_
+        elif (part.startswith('*') and part.endswith('*') and not part.startswith('**')) or \
+             (part.startswith('_') and part.endswith('_')):
+            rich_text.append({
+                "type": "text",
+                "text": {"content": part[1:-1]},
+                "annotations": {"italic": True}
+            })
+        # Link: [text](url)
         elif part.startswith('[') and '](' in part:
             match = re.match(r'\[([^\]]+)\]\(([^)]+)\)', part)
             if match:
@@ -800,6 +807,32 @@ def parse_inline_markdown(text: str) -> list[dict]:
     return rich_text if rich_text else [{"type": "text", "text": {"content": text}}]
 
 
+def sanitize_newsletter(markdown_text: str) -> str:
+    """
+    Quick Claude pass to fix stray asterisks, broken formatting, and
+    any other markdown artifacts before writing to Notion.
+    """
+    import anthropic
+    client = anthropic.Anthropic()
+
+    message = client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=8000,
+        messages=[{"role": "user", "content": f"""You are proofreading a markdown newsletter before it is published. Fix ONLY formatting issues — do not change any content, wording, or structure.
+
+Specifically fix:
+- Stray asterisks that weren't converted to bold or italic (e.g. a lone * or ** not wrapping any text)
+- Incomplete markdown links that show raw [text](url) syntax instead of being properly formatted
+- Any other broken markdown formatting artifacts
+
+Return the corrected markdown only, with zero commentary or explanation.
+
+---
+{markdown_text}"""}]
+    )
+    return message.content[0].text.strip()
+
+
 def create_summary_entry(
     notion: Client,
     summary_text: str,
@@ -813,10 +846,35 @@ def create_summary_entry(
 
     Returns page ID.
     """
-    title = f"Monthly Summary - {month_name}"
+    title = f"Industry Trend Report - {month_name}"
+
+    # Sanitize markdown before conversion
+    print("Sanitizing newsletter formatting...")
+    summary_text = sanitize_newsletter(summary_text)
+
+    # Build header block prepended to the page body
+    header_blocks = [
+        {
+            "object": "block",
+            "type": "heading_1",
+            "heading_1": {"rich_text": [{"type": "text", "text": {"content": title}}]}
+        },
+        {
+            "object": "block",
+            "type": "paragraph",
+            "paragraph": {"rich_text": [{"type": "text", "text": {
+                "content": f"{date.today().strftime('%B %Y')} · {article_count} articles analyzed"
+            }, "annotations": {"color": "gray"}}]}
+        },
+        {
+            "object": "block",
+            "type": "divider",
+            "divider": {}
+        },
+    ]
 
     # Convert markdown to Notion blocks
-    content_blocks = markdown_to_notion_blocks(summary_text)
+    content_blocks = header_blocks + markdown_to_notion_blocks(summary_text)
 
     properties = {
         "Title": {"title": [{"text": {"content": title}}]},
@@ -842,7 +900,7 @@ def create_summary_entry(
             children=content_blocks[i:i + BATCH_SIZE]
         )
 
-    logger.info(f"Created Monthly Summary entry: {title}")
+    logger.info(f"Created Industry Trend Report entry: {title}")
     return page_id, response["url"]
 
 
