@@ -396,7 +396,7 @@ Start with this exact format:
 
 > **TL;DR:** [2 sentences max — the 1-3 most important trend signals, including markdown links]
 
-Then write the detailed section using ### subheadings for each major trend. Under each ### subheading, lead with 1-2 sentences of prose context, then use - bullet points only if you have 3 or more parallel items to list. Aim for a natural mix — not all bullets, not all prose.
+Then write the detailed section using ### subheadings for each major trend. Under each ### subheading, lead with 1-2 sentences of prose context, then use - bullet points freely to make data points scannable. Aim for a dynamic mix of paragraphs and bullets — not all one or the other.
 
 Style rules:
 - Target 350-450 words for the full section
@@ -414,7 +414,7 @@ Start with this exact format:
 
 > **TL;DR:** [2 sentences max — the 1-2 most important events, including markdown links]
 
-Then write the detailed section using ### subheadings for each event or theme. Under each ### subheading, lead with prose sentences — use - bullet points only if you have 3 or more parallel sub-points to list.
+Then write the detailed section using ### subheadings for each event or theme. Under each ### subheading, lead with prose sentences, then use - bullet points freely to highlight key details. Aim for a dynamic mix of paragraphs and bullets.
 
 Style rules:
 - Target 300-400 words for the full section
@@ -433,7 +433,7 @@ Start with this exact format:
 
 > **TL;DR:** [2 sentences max — the 1-2 most actionable pain points, including markdown links]
 
-Then write the detailed section using ### subheadings for each pain point or theme. Under each ### subheading, write 2-3 sentences of prose explaining the issue and why it matters — avoid converting everything into bullets. Use - bullet points only if listing 3+ concrete examples or symptoms.
+Then write the detailed section using ### subheadings for each pain point or theme. Under each ### subheading, write 1-2 sentences of prose explaining the issue, then use - bullet points freely to highlight examples, symptoms, or quotes. Mix prose and bullets to keep it dynamic and scannable.
 
 Style rules:
 - Target 300-400 words for the full section
@@ -462,7 +462,7 @@ Then use ### subheadings for each major theme, prefixed with a priority emoji:
 - 🟡 for medium-priority issues (notable but less urgent)
 - 🟢 for opportunities and positive signals
 
-Under each ### subheading, write 2-3 sentences of prose — cite conversation links inline. Use - bullet points only for listing 3+ concrete workarounds or examples.
+Under each ### subheading, write 1-2 sentences of prose — cite conversation links inline — then use - bullet points freely for examples, workarounds, or quotes. Mix prose and bullets to keep it dynamic and scannable.
 
 Style rules:
 - Target 350-450 words for the full section
@@ -481,10 +481,10 @@ Start with this exact format:
 
 > **TL;DR:** [2 sentences max — the 2-3 most important strategic takeaways, including markdown links]
 
-Write 3-5 - bullet points. Each bullet should name the signal and state the implication for Planning Center in 2-3 sentences. Do not use ### subheadings.
+Write 3-5 implications ordered from highest to lowest priority. For each one, use a ### subheading numbered by priority (e.g. "### 1. Authentication friction is a retention risk"), then write 2-3 sentences beneath it explaining the signal and the recommended action. No bullet points in this section — prose only under each heading.
 
 Style rules:
-- Target 200-300 words total
+- Target 250-350 words total
 - Bold ONLY statistics and key data points — not headers, not link text
 - Do NOT output --- horizontal rules
 - Do not use # or ## headers""",
