@@ -372,6 +372,101 @@ ADDITIONAL FORMATTING RULES:
 Begin your trend report:"""
 
 
+SECTION_SYSTEM_CONTEXT = """You are a strategic analyst for Planning Center, a company that builds church management software used by thousands of churches. You are writing one section of a monthly internal trend newsletter for the product team.
+
+CONTEXT:
+- Planning Center builds tools for church operations: check-in, giving, groups, people management, services planning
+- Our users are church administrators, pastors, and volunteers
+- We monitor industry news, competitor activity, and user discussions to inform product decisions
+
+ANALYSIS PERIOD: {period_description}
+TOTAL ARTICLES IN DIGEST: {article_count}
+
+ARTICLE DIGEST:
+{article_digest}
+"""
+
+SECTION_PROMPTS = {
+    "trends": """Write ONLY the ## 📈 Emerging Trends section of the newsletter.
+
+Identify patterns where multiple sources discuss the same topic. Only include genuine trends — not just because articles exist on a topic. Skip generic content.
+
+Start with this exact format:
+## 📈 Emerging Trends
+
+> **TL;DR:** [One short paragraph with the 1-3 most important trend signals, including markdown links]
+
+Then write the detailed section (3-5 paragraphs max). Use markdown links: [Title](url). Be selective and concise — quality over quantity. Do not include any other section headers.""",
+
+    "events": """Write ONLY the ## 🏢 Major Industry Events section of the newsletter.
+
+Cover significant events impacting Planning Center: direct mentions of "Planning Center", competitor acquisitions/mergers/launches, new technologies being adopted by churches. If nothing major happened, say so in one sentence and stop.
+
+Start with this exact format:
+## 🏢 Major Industry Events
+
+> **TL;DR:** [One short paragraph with the 1-2 most important events, including markdown links]
+
+Then write the detailed section. Use markdown links: [Title](url). If truly nothing noteworthy happened, write: "## 🏢 Major Industry Events\\n\\nNothing significant to report this month." Do not include any other section headers.""",
+
+    "sentiment": """Write ONLY the ## 💬 User Sentiment & Pain Points section of the newsletter.
+
+Focus on what church leaders and administrators are talking about — pain points Planning Center could address or should be aware of. Skip generic complaints. Only highlight if there's a genuine signal worth acting on.
+
+Start with this exact format:
+## 💬 User Sentiment & Pain Points
+
+> **TL;DR:** [One short paragraph with the 1-2 most actionable pain points, including markdown links]
+
+Then write the detailed section. Use markdown links: [Title](url). Do not include any other section headers.""",
+
+    "community": """Write ONLY the ## 💭 Community Discussions section of the newsletter.
+
+You are receiving Community Discussion entries from our Circle community. Each entry's summary starts with 🔗 Conversation Links — use those URLs as inline markdown citations when referencing specific themes: [brief label](url).
+
+Focus on: recurring themes, pain points, feature requests from actual Planning Center users. This should feel different from external industry content — it's direct user voice.
+
+If the entries don't contain substantial unique insights, output exactly: SKIP_SECTION
+
+Otherwise start with this exact format:
+## 💭 Community Discussions
+
+> **TL;DR:** [One short paragraph with the 1-2 most important community signals, including markdown links to specific conversations]
+
+Then write the detailed section with inline conversation links. Do not include any other section headers.""",
+
+    "implications": """Write ONLY the ## 🎯 Strategic Implications section of the newsletter.
+
+You are given the other four sections of this month's newsletter as context. Your job is to synthesize them into actionable insights for the product team. What should we pay attention to? What opportunities or threats are emerging? Tie back to the most important findings from the other sections.
+
+{previous_sections}
+
+Start with this exact format:
+## 🎯 Strategic Implications
+
+> **TL;DR:** [One short paragraph with the 2-3 most important strategic takeaways, including markdown links]
+
+Then write the detailed section (3-5 bullets or short paragraphs). Be specific and actionable. Do not include any other section headers.""",
+
+    "headline": """Based on this month's newsletter sections below, write a single clickbait headline.
+
+{all_sections}
+
+Output ONLY this line (nothing else):
+HEADLINE: [Your snappy one-liner here]
+
+Requirements:
+- One sentence, under 100 characters
+- Slightly irreverent but professional
+- References a specific finding from this month's content
+- Makes someone want to read more
+
+Examples:
+- HEADLINE: AI is coming for your church bulletin, and pastors are surprisingly okay with it
+- HEADLINE: Three ChMS vendors walk into a merger, only two walk out"""
+}
+
+
 def generate_monthly_summary(
     anthropic_client,
     article_digest: str,
