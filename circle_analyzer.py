@@ -819,6 +819,23 @@ def query_circle_source(notion: Client) -> Optional[dict]:
     }
 
 
+def build_rich_text(text: str, max_chunk: int = 1990) -> list:
+    """Split text into Notion rich_text objects (max 2000 chars each)."""
+    chunks = []
+    while text:
+        if len(text) <= max_chunk:
+            chunks.append({"text": {"content": text}})
+            break
+        split_at = text[:max_chunk].rfind('\n')
+        if split_at <= 0:
+            split_at = text[:max_chunk].rfind(' ')
+        if split_at <= 0:
+            split_at = max_chunk
+        chunks.append({"text": {"content": text[:split_at]}})
+        text = text[split_at:]
+    return chunks
+
+
 def create_theme_entry(
     notion: Client,
     theme: dict,
@@ -836,58 +853,46 @@ def create_theme_entry(
         title = title[:97] + "..."
 
     # Build rich summary with emphasis on customer quotes and threads
-    summary_parts = [
-        f"Space: {theme['space_name']}",
-        f"\n\n{theme['description']}",
-    ]
+    summary_parts = []
 
-    # Add thread engagement if available
-    if theme.get("thread_engagement"):
-        summary_parts.append(f"\n\n🔥 Thread Activity: {theme['thread_engagement']}")
+    # Conversation links at the top — visible immediately in Notion and
+    # preserved for newsletter digest (monthly_summary reads from the top)
+    all_urls = theme.get("high_impact_urls", []) + theme.get("additional_urls", [])
+    if all_urls:
+        summary_parts.append("🔗 Conversation Links:")
+        for url in all_urls:
+            summary_parts.append(f"\n• {url}")
 
-    # Add pain points
+    summary_parts.append(f"\n\nSpace: {theme['space_name']}")
+    summary_parts.append(f"\n\n{theme['description']}")
+
     if theme["pain_points"]:
         summary_parts.append("\n\n💔 Pain Points:")
-        for point in theme["pain_points"][:3]:  # Limit to 3
+        for point in theme["pain_points"][:3]:
             summary_parts.append(f"\n• {point}")
 
-    # Add customer quotes (multiple if available)
     if theme["quotes"]:
         summary_parts.append("\n\n💬 Customer Voices:")
-        for i, quote in enumerate(theme["quotes"][:3]):  # Limit to 3 quotes
-            # Truncate very long quotes
+        for i, quote in enumerate(theme["quotes"][:3]):
             if len(quote) > 200:
                 quote = quote[:197] + "..."
             summary_parts.append(f"\n\"{quote}\"")
-            if i < len(theme["quotes"]) - 1:  # Add separator if not last quote
+            if i < len(theme["quotes"]) - 1:
                 summary_parts.append("\n")
 
-    # Add sentiment
     summary_parts.append(f"\n\n😊 Sentiment: {theme['sentiment']}")
 
-    # Add high-impact thread links
-    if theme.get("high_impact_urls"):
-        summary_parts.append("\n\n🔗 High-Engagement Threads:")
-        for url in theme["high_impact_urls"][:2]:  # Limit to 2
-            summary_parts.append(f"\n• {url}")
-
-    # Add recommendations
     if theme["recommendations"]:
         summary_parts.append(f"\n\n💡 Recommended Actions:\n{theme['recommendations']}")
 
     summary = "".join(summary_parts)
-
-    # Truncate if too long (prioritize keeping quotes and links)
-    if len(summary) > 1900:
-        # Try to keep at least description, quotes, and first link
-        summary = summary[:1900] + "..."
 
     properties = {
         "Title": {"title": [{"text": {"content": title}}]},
         "Type": {"select": {"name": "Community Discussion"}},
         "Topic": {"multi_select": [{"name": "Conversation"}]},
         "Date Found": {"date": {"start": date.today().isoformat()}},
-        "Summary": {"rich_text": [{"text": {"content": summary}}]},
+        "Summary": {"rich_text": build_rich_text(summary)},
         "Source Page": {"relation": [{"id": source_page_id}]},
     }
 

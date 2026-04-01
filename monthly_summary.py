@@ -67,13 +67,12 @@ except ImportError:
     sys.exit(1)
 
 
-def get_anthropic_client():
-    """Initialize Anthropic client with API key from environment."""
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
+def check_anthropic_key():
+    """Verify ANTHROPIC_API_KEY is set before starting generation."""
+    if not os.environ.get("ANTHROPIC_API_KEY"):
         logger.error("ANTHROPIC_API_KEY not set. Cannot generate summary.")
-        return None
-    return anthropic.Anthropic(api_key=api_key)
+        return False
+    return True
 
 
 def get_notion_client() -> Client:
@@ -162,10 +161,13 @@ def query_recent_articles(notion: Client, start_date: date, end_date: date) -> l
             # Extract URL
             url = props.get("URL", {}).get("url", "")
 
-            # Extract summary
+            # Extract summary (may be stored across multiple rich_text chunks)
             summary = ""
             if props.get("Summary", {}).get("rich_text"):
-                summary = props["Summary"]["rich_text"][0]["plain_text"] if props["Summary"]["rich_text"] else ""
+                summary = "".join(
+                    chunk.get("plain_text", chunk.get("text", {}).get("content", ""))
+                    for chunk in props["Summary"]["rich_text"]
+                )
 
             # Extract topics (multi-select)
             topics = []
@@ -219,9 +221,9 @@ def group_articles_by_topic(articles: list[dict]) -> dict[str, list]:
     return dict(grouped)
 
 
-def build_article_digest(articles: list[dict], max_chars_per_article: int = 300) -> str:
+def build_article_digest(articles: list[dict]) -> str:
     """
-    Build a condensed digest of all articles for Claude input.
+    Build a digest of all articles for Claude input.
     Includes URLs so Claude can cite sources in the output.
 
     Separates Community Discussion entries from regular Articles.
@@ -229,7 +231,7 @@ def build_article_digest(articles: list[dict], max_chars_per_article: int = 300)
     Format:
     [ARTICLES BY TOPIC]
     [AI/ML - 15 articles]
-    - "Article Title" (URL) - Summary truncated...
+    - "Article Title" (URL) - Summary...
 
     [COMMUNITY DISCUSSIONS]
     - "Discussion Title" (URL) - Summary...
@@ -252,12 +254,7 @@ def build_article_digest(articles: list[dict], max_chars_per_article: int = 300)
             for article in topic_articles:
                 title = article["title"][:100] if article["title"] else "(No title)"
                 url = article["url"] or ""
-
-                # Truncate summary but keep more detail
                 summary = article["summary"] or "(No summary)"
-                if len(summary) > max_chars_per_article:
-                    summary = summary[:max_chars_per_article].rsplit(' ', 1)[0] + "..."
-
                 lines.append(f'- "{title}" ({url}) - {summary}')
 
     # Process community discussions separately
@@ -266,12 +263,7 @@ def build_article_digest(articles: list[dict], max_chars_per_article: int = 300)
         for discussion in community_discussions:
             title = discussion["title"][:100] if discussion["title"] else "(No title)"
             url = discussion["url"] or ""
-
-            # Truncate summary but keep more detail
             summary = discussion["summary"] or "(No summary)"
-            if len(summary) > max_chars_per_article:
-                summary = summary[:max_chars_per_article].rsplit(' ', 1)[0] + "..."
-
             lines.append(f'- "{title}" ({url}) - {summary}')
 
     return "\n".join(lines)
@@ -281,27 +273,7 @@ def build_article_digest(articles: list[dict], max_chars_per_article: int = 300)
 # CLAUDE INTEGRATION
 # ============================================================================
 
-MONTHLY_SUMMARY_PROMPT = """You are a strategic analyst for Planning Center, a company that builds church management software used by thousands of churches. Your task is to write a monthly trend report based on articles from our industry monitoring. This should read like a polished internal newsletter for our product team.
-
-FIRST, OUTPUT A CLICKBAIT HEADLINE:
-Before the main report, output a single catchy, clickbait-style, semi-humorous one-liner that captures the month's most interesting theme or finding. This will be used as a teaser summary.
-
-Format it exactly like this on its own line:
-HEADLINE: [Your snappy one-liner here]
-
-Examples of good headlines:
-- HEADLINE: AI is coming for your church bulletin, and pastors are surprisingly okay with it
-- HEADLINE: Three ChMS vendors walk into a merger, only two walk out
-- HEADLINE: Turns out churches DO want online giving—who knew?
-- HEADLINE: The great volunteer shortage of 2026 is real, and it's spectacular
-
-The headline should be:
-- One sentence, under 100 characters ideally
-- Slightly irreverent but still professional
-- Reference a specific finding from this month's articles
-- Make someone want to read more
-
-After the headline, continue with the full report below.
+SECTION_SYSTEM_CONTEXT = """You are a strategic analyst for Planning Center, a company that builds church management software used by thousands of churches. You are writing one section of a monthly internal trend newsletter for the product team.
 
 CONTEXT:
 - Planning Center builds tools for church operations: check-in, giving, groups, people management, services planning
@@ -309,147 +281,243 @@ CONTEXT:
 - We monitor industry news, competitor activity, and user discussions to inform product decisions
 
 ANALYSIS PERIOD: {period_description}
-TOTAL ARTICLES ANALYZED: {article_count}
+TOTAL ARTICLES IN DIGEST: {article_count}
 
-ARTICLE DIGEST (includes URLs for citation):
+ARTICLE DIGEST:
 {article_digest}
+"""
 
-CRITICAL: BE SELECTIVE, NOT COMPREHENSIVE
+SECTION_PROMPTS = {
+    "trends": """Write ONLY the ## 📈 Emerging Trends section of the newsletter.
 
-You are NOT expected to mention every article. Most articles in the digest are routine industry content that doesn't warrant inclusion. Your job is to identify and highlight ONLY the articles that:
+Identify patterns where multiple sources discuss the same topic. Only include genuine trends — not just because articles exist on a topic. Skip generic content.
 
-1. Represent genuine strategic signals (not just marketing fluff or generic advice)
-2. Indicate real industry shifts or competitive threats
-3. Contain specific data, announcements, or insights that could inform product decisions
-4. Show patterns when multiple sources discuss the same emerging issue
-
-SKIP articles that are:
-- Generic "how-to" content or best practices advice
-- Marketing pieces without substantive news
-- Repetitive coverage of the same topic (cite the best source, not all of them)
-- Tangentially related but not actionable for Planning Center
-
-If only 5-10 articles out of {article_count} are truly worth highlighting, that's fine. Quality over quantity.
-
-Write a trend report with these section headers (including emojis):
-
+Start with this exact format:
 ## 📈 Emerging Trends
 
+> **TL;DR:** [2 sentences max — the 1-3 most important trend signals, including markdown links]
+
+Then write the detailed section using ### subheadings for each major trend. Under each ### subheading, lead with 1-2 sentences of prose context, then use - bullet points freely to make data points scannable. Aim for a dynamic mix of paragraphs and bullets — not all one or the other.
+
+Style rules:
+- Target 350-450 words for the full section
+- Use markdown links: [Title](url)
+- Bold ONLY statistics and key data points (e.g. **77%**, **$2.4M**) — not headers, not link text
+- Do NOT output --- horizontal rules
+- Do not use # or ## headers""",
+
+    "events": """Write ONLY the ## 🏢 Major Industry Events section of the newsletter.
+
+Cover significant events impacting Planning Center: direct mentions of "Planning Center", competitor acquisitions/mergers/launches, new technologies being adopted by churches. If nothing major happened, say so in one sentence and stop.
+
+Start with this exact format:
 ## 🏢 Major Industry Events
 
+> **TL;DR:** [2 sentences max — the 1-2 most important events, including markdown links]
+
+Then write the detailed section using ### subheadings for each event or theme. Under each ### subheading, lead with prose sentences, then use - bullet points freely to highlight key details. Aim for a dynamic mix of paragraphs and bullets.
+
+Style rules:
+- Target 300-400 words for the full section
+- Use markdown links: [Title](url)
+- Bold ONLY statistics and key data points — not headers, not link text
+- Do NOT output --- horizontal rules
+- If truly nothing noteworthy happened, write only: "Nothing significant to report this month."
+- Do not use # or ## headers""",
+
+    "sentiment": """Write ONLY the ## 💬 User Sentiment & Pain Points section of the newsletter.
+
+Focus on what church leaders and administrators are talking about — pain points Planning Center could address or should be aware of. Skip generic complaints. Only highlight if there's a genuine signal worth acting on.
+
+Start with this exact format:
 ## 💬 User Sentiment & Pain Points
 
-## 💭 Community Discussions
-[ONLY include this section if there are Community Discussion entries in the digest AND they contain substantial insights worth highlighting. If community discussions are trivial or redundant with other sections, skip this section entirely.]
+> **TL;DR:** [2 sentences max — the 1-2 most actionable pain points, including markdown links]
 
+Then write the detailed section using ### subheadings for each pain point or theme. Under each ### subheading, write 1-2 sentences of prose explaining the issue, then use - bullet points freely to highlight examples, symptoms, or quotes. Mix prose and bullets to keep it dynamic and scannable.
+
+Style rules:
+- Target 300-400 words for the full section
+- Use markdown links: [Title](url)
+- Bold ONLY statistics and key data points — not headers, not link text
+- Do NOT output --- horizontal rules
+- Do not use # or ## headers""",
+
+    "community": """Write ONLY the ## 💭 Community Discussions section of the newsletter.
+
+You are receiving Community Discussion entries from our Circle community. Each entry's summary starts with 🔗 Conversation Links — use those URLs as inline markdown citations when referencing specific themes: [brief label](url).
+
+Focus on: recurring themes, pain points, feature requests from actual Planning Center users. This should feel different from external industry content — it's direct user voice.
+
+If the entries don't contain substantial unique insights, output exactly: SKIP_SECTION
+
+Otherwise start with this exact format:
+## 💭 Community Discussions
+
+> **TL;DR:** [2 sentences max — the 1-2 most important community signals, including markdown links to specific conversations]
+
+Write a brief intro paragraph (2-3 sentences) framing the overall community mood this month.
+
+Then use ### subheadings for each major theme, prefixed with a priority emoji:
+- 🔴 for high-priority pain points (multiple users, impacts core workflows)
+- 🟡 for medium-priority issues (notable but less urgent)
+- 🟢 for opportunities and positive signals
+
+Under each ### subheading, write 1-2 sentences of prose — cite conversation links inline — then use - bullet points freely for examples, workarounds, or quotes. Mix prose and bullets to keep it dynamic and scannable.
+
+Style rules:
+- Target 350-450 words for the full section
+- Bold ONLY statistics and key data points — not headers, not link text
+- Do NOT output --- horizontal rules
+- Do not use # or ## headers""",
+
+    "implications": """Write ONLY the ## 🎯 Strategic Implications section of the newsletter.
+
+You are given the other sections of this month's newsletter as context. Synthesize them into actionable insights for the product team. Be specific — tie back to named findings from the other sections.
+
+{previous_sections}
+
+Start with this exact format:
 ## 🎯 Strategic Implications
 
-SECTION CONTENT REQUIREMENTS:
+> **TL;DR:** [2 sentences max — the 2-3 most important strategic takeaways, including markdown links]
 
-**📈 Emerging Trends**: Identify patterns where multiple sources discuss the same topic or theme. Only include if there's a genuine trend worth noting - not just because articles exist on a topic.
+Write 3-5 implications ordered from highest to lowest priority. For each one, use a ### subheading numbered by priority (e.g. "### 1. Authentication friction is a retention risk"), then write 2-3 sentences beneath it explaining the signal and the recommended action. No bullet points in this section — prose only under each heading.
 
-**🏢 Major Industry Events**: Cover significant events that would impact Planning Center - mentions of "Planning Center" specifically, acquisitions, mergers, partnerships, new product launches from competitors, new technologies being adopted by churches. If nothing major happened, say so briefly and move on.
+Style rules:
+- Target 250-350 words total
+- Bold ONLY statistics and key data points — not headers, not link text
+- Do NOT output --- horizontal rules
+- Do not use # or ## headers""",
 
-**💬 User Sentiment & Pain Points**: What are church leaders and administrators talking about? Focus on pain points that Planning Center could address or should be aware of. Skip generic complaints.
+    "headline": """Based on this month's newsletter sections below, write a single clickbait headline.
 
-**💭 Community Discussions**: [CONDITIONAL SECTION] If the digest includes Community Discussion entries with substantial insights, create this section to highlight key themes, pain points, or feature requests from the Planning Center community. This section should focus on direct user feedback and discussions that differ from external industry content. Do NOT duplicate information that's already covered in other sections. If community discussions don't add unique value beyond what's in other sections, omit this section entirely.
+{all_sections}
 
-**🎯 Strategic Implications**: Conclude with actionable insights for the product team. What should we pay attention to? What opportunities or threats are emerging? Be specific and tie back to the most important findings.
+Output ONLY this line (nothing else):
+HEADLINE: [Your snappy one-liner here]
 
-CRITICAL FORMATTING REQUIREMENT - TL;DR CALLOUTS:
-Immediately after EACH section header (## emoji Title), include a TL;DR callout block using this exact format:
+Requirements:
+- One sentence, under 100 characters
+- Slightly irreverent but professional
+- References a specific finding from this month's content
+- Makes someone want to read more
 
-> **TL;DR:** [One short paragraph summarizing the 1-3 most important/impactful points from this section, including markdown links to the key articles]
+Examples:
+- HEADLINE: AI is coming for your church bulletin, and pastors are surprisingly okay with it
+- HEADLINE: Three ChMS vendors walk into a merger, only two walk out"""
+}
 
-Example:
-## 📈 Emerging Trends
 
-> **TL;DR:** AI adoption in churches has shifted from theoretical to practical, with [Barna research](url) showing 77% of pastors believe God can use AI. Meanwhile, the [Vanco-ACS merger](url) signals major consolidation in church software.
+def generate_section(
+    section_key: str,
+    digest: str,
+    period_description: str,
+    article_count: int,
+    model: str = "claude-opus-4-6",
+    previous_sections: str = "",
+    all_sections: str = "",
+) -> str:
+    """Generate a single newsletter section using a focused prompt."""
+    import anthropic
+    client = anthropic.Anthropic()
 
-[Then continue with the full detailed section content...]
+    system_context = SECTION_SYSTEM_CONTEXT.format(
+        period_description=period_description,
+        article_count=article_count,
+        article_digest=digest,
+    )
 
-ADDITIONAL FORMATTING RULES:
-- Use markdown formatting for readability (headers, bold, bullet points)
-- Include URLs as markdown links: [Article Title](url)
-- Write in a professional but accessible tone
-- Be concise - a shorter, focused report is better than a long comprehensive one
-- If a section has nothing noteworthy, include a brief "Nothing significant to report this month" and move on
-- The TL;DR callouts are REQUIRED for each section
+    section_prompt = SECTION_PROMPTS[section_key]
+    if section_key == "implications":
+        section_prompt = section_prompt.format(previous_sections=previous_sections)
+    elif section_key == "headline":
+        section_prompt = section_prompt.format(all_sections=all_sections)
+        # Headline doesn't need the article digest in system context
+        system_context = ""
 
-Begin your trend report:"""
+    full_prompt = f"{system_context}\n\n{section_prompt}" if system_context else section_prompt
+
+    message = client.messages.create(
+        model=model,
+        max_tokens=1500,
+        messages=[{"role": "user", "content": full_prompt}],
+    )
+
+    return message.content[0].text.strip()
 
 
 def generate_monthly_summary(
-    anthropic_client,
     article_digest: str,
     period_description: str,
     article_count: int
 ) -> tuple[str, str]:
     """
-    Generate strategic trend analysis using Claude Sonnet.
+    Generate strategic trend analysis using per-section Claude Opus calls.
 
     Returns tuple of (headline, body) where:
     - headline: Clickbait-style one-liner for the Summary property
     - body: Full markdown-formatted analysis for Notion page body
     """
-    import re
-
-    prompt = MONTHLY_SUMMARY_PROMPT.format(
-        period_description=period_description,
-        article_count=article_count,
-        article_digest=article_digest
-    )
-
     try:
-        message = anthropic_client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=8000,
-            messages=[
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ]
+        shared_kwargs = dict(
+            period_description=period_description,
+            article_count=article_count,
+            model="claude-opus-4-6",
         )
 
-        partial_response = message.content[0].text
+        print("Generating section: Emerging Trends...")
+        trends = generate_section("trends", article_digest, **shared_kwargs)
 
-        if message.stop_reason == "max_tokens":
-            logger.warning("Response hit max_tokens limit — requesting continuation...")
-            continuation = anthropic_client.messages.create(
-                model="claude-sonnet-4-6",
-                max_tokens=8000,
-                messages=[
-                    {"role": "user", "content": prompt},
-                    {"role": "assistant", "content": partial_response},
-                    {"role": "user", "content": "Your response was cut off. Please continue exactly where you left off, completing the current sentence and any remaining sections."}
-                ]
-            )
-            if continuation.stop_reason == "max_tokens":
-                raise ValueError(
-                    "Response still truncated after continuation attempt. "
-                    "Consider reducing the article count or digest length."
-                )
-            partial_response = partial_response + continuation.content[0].text
-            logger.info("Continuation successful — responses merged.")
+        print("Generating section: Major Industry Events...")
+        events = generate_section("events", article_digest, **shared_kwargs)
 
-        full_response = partial_response.strip()
+        print("Generating section: User Sentiment & Pain Points...")
+        sentiment = generate_section("sentiment", article_digest, **shared_kwargs)
 
-        # Parse out the headline
-        headline = ""
-        body = full_response
+        # Community section uses only the community portion of the digest.
+        # build_article_digest already groups community discussions under
+        # [COMMUNITY DISCUSSIONS] — pass the full digest and let the prompt
+        # focus the model on that block.
+        print("Generating section: Community Discussions...")
+        community_raw = generate_section("community", article_digest, **shared_kwargs)
+        community = "" if community_raw.strip() == "SKIP_SECTION" else community_raw
 
-        # Look for HEADLINE: pattern at the start
-        headline_match = re.match(r'^HEADLINE:\s*(.+?)(?:\n|$)', full_response, re.IGNORECASE)
-        if headline_match:
-            headline = headline_match.group(1).strip()
-            # Remove the headline line from the body
-            body = full_response[headline_match.end():].strip()
-            logger.info(f"Extracted headline: {headline}")
-        else:
+        # Strategic Implications sees all prior sections
+        previous_sections_text = "\n\n---\n\n".join(filter(None, [trends, events, sentiment, community]))
+        print("Generating section: Strategic Implications...")
+        implications = generate_section(
+            "implications",
+            article_digest,
+            previous_sections=previous_sections_text,
+            **shared_kwargs,
+        )
+
+        # Assemble body
+        sections = [trends, events, sentiment]
+        if community:
+            sections.append(community)
+        sections.append(implications)
+        all_sections_text = "\n\n---\n\n".join(sections)
+
+        # Generate headline
+        print("Generating headline...")
+        headline_raw = generate_section(
+            "headline",
+            digest="",
+            period_description=period_description,
+            article_count=article_count,
+            model="claude-opus-4-6",
+            all_sections=all_sections_text,
+        )
+        headline = headline_raw.replace("HEADLINE:", "").strip()
+        if not headline:
             logger.warning("No HEADLINE found in response, using default")
             headline = f"What happened in {period_description}"
+        else:
+            logger.info(f"Extracted headline: {headline}")
 
+        body = all_sections_text
         return headline, body
 
     except Exception as e:
@@ -461,153 +529,134 @@ def generate_monthly_summary(
 # NOTION OUTPUT
 # ============================================================================
 
+def _inline_to_rich_text(children) -> list[dict]:
+    """
+    Convert markdown-it-py inline token children to a Notion rich_text array.
+    Handles bold, italic, links, and plain text correctly via state machine.
+    """
+    rich_text = []
+    bold = False
+    italic = False
+    current_link = None
+
+    for child in (children or []):
+        if child.type == 'strong_open':
+            bold = True
+        elif child.type == 'strong_close':
+            bold = False
+        elif child.type == 'em_open':
+            italic = True
+        elif child.type == 'em_close':
+            italic = False
+        elif child.type == 'link_open':
+            attrs = child.attrs or {}
+            current_link = attrs.get('href', '') if isinstance(attrs, dict) else next(
+                (v for k, v in attrs if k == 'href'), None
+            )
+        elif child.type == 'link_close':
+            current_link = None
+        elif child.type in ('text', 'softbreak', 'hardbreak'):
+            content = ' ' if child.type in ('softbreak', 'hardbreak') else child.content
+            if not content:
+                continue
+            entry = {"type": "text", "text": {"content": content}}
+            if current_link:
+                entry["text"]["link"] = {"url": current_link}
+            annotations = {}
+            if bold:
+                annotations["bold"] = True
+            if italic:
+                annotations["italic"] = True
+            if annotations:
+                entry["annotations"] = annotations
+            rich_text.append(entry)
+        elif child.type == 'code_inline':
+            rich_text.append({
+                "type": "text",
+                "text": {"content": child.content},
+                "annotations": {"code": True}
+            })
+
+    return rich_text if rich_text else [{"type": "text", "text": {"content": ""}}]
+
+
 def markdown_to_notion_blocks(markdown_text: str) -> list[dict]:
     """
-    Convert markdown text to Notion blocks.
-    Handles headers, paragraphs, bullet points, links, and callouts (blockquotes).
+    Convert markdown text to Notion blocks using markdown-it-py.
+    Handles headings, paragraphs, bullet lists, blockquotes (callouts), and dividers.
     """
-    import re
+    from markdown_it import MarkdownIt
+    md = MarkdownIt()
+    tokens = md.parse(markdown_text)
+
     blocks = []
-    lines = markdown_text.split('\n')
     i = 0
 
-    while i < len(lines):
-        line = lines[i]
+    while i < len(tokens):
+        token = tokens[i]
 
-        # Skip empty lines
-        if not line.strip():
+        # Horizontal rule → Notion divider
+        if token.type == 'hr':
+            blocks.append({"object": "block", "type": "divider", "divider": {}})
             i += 1
-            continue
 
-        # Blockquote / Callout (lines starting with >)
-        if line.strip().startswith('>'):
-            # Collect all consecutive blockquote lines
-            callout_lines = []
-            while i < len(lines) and lines[i].strip().startswith('>'):
-                # Remove the > prefix and any leading space
-                content = lines[i].strip()[1:].strip()
-                callout_lines.append(content)
-                i += 1
+        # Headings: heading_open / inline / heading_close
+        elif token.type == 'heading_open':
+            notion_type = {'h1': 'heading_1', 'h2': 'heading_2', 'h3': 'heading_3'}.get(token.tag, 'heading_2')
+            rich_text = _inline_to_rich_text(tokens[i + 1].children)
+            blocks.append({"object": "block", "type": notion_type, notion_type: {"rich_text": rich_text}})
+            i += 3  # open, inline, close
 
-            callout_text = ' '.join(callout_lines)
+        # Paragraphs: paragraph_open / inline / paragraph_close
+        elif token.type == 'paragraph_open':
+            rich_text = _inline_to_rich_text(tokens[i + 1].children)
+            blocks.append({"object": "block", "type": "paragraph", "paragraph": {"rich_text": rich_text}})
+            i += 3
 
+        # Bullet lists
+        elif token.type == 'bullet_list_open':
+            i += 1  # skip list_open
+            while i < len(tokens) and tokens[i].type != 'bullet_list_close':
+                t = tokens[i]
+                if t.type == 'list_item_open':
+                    i += 1
+                elif t.type == 'paragraph_open':
+                    # Loose list: list item wraps content in a paragraph
+                    rich_text = _inline_to_rich_text(tokens[i + 1].children)
+                    blocks.append({"object": "block", "type": "bulleted_list_item",
+                                   "bulleted_list_item": {"rich_text": rich_text}})
+                    i += 3
+                elif t.type == 'inline':
+                    # Tight list: inline content directly inside list item
+                    rich_text = _inline_to_rich_text(t.children)
+                    blocks.append({"object": "block", "type": "bulleted_list_item",
+                                   "bulleted_list_item": {"rich_text": rich_text}})
+                    i += 1
+                else:
+                    i += 1  # list_item_close or nested list
+            i += 1  # skip list_close
+
+        # Blockquotes → Notion callout blocks
+        elif token.type == 'blockquote_open':
+            all_rich_text = []
+            i += 1
+            while i < len(tokens) and tokens[i].type != 'blockquote_close':
+                if tokens[i].type == 'paragraph_open':
+                    all_rich_text.extend(_inline_to_rich_text(tokens[i + 1].children))
+                    i += 3
+                else:
+                    i += 1
+            i += 1  # skip blockquote_close
             blocks.append({
                 "object": "block",
                 "type": "callout",
-                "callout": {
-                    "rich_text": parse_inline_markdown(callout_text),
-                    "color": "blue_background"
-                }
+                "callout": {"rich_text": all_rich_text, "color": "blue_background"}
             })
-            continue
 
-        # H1 header
-        if line.startswith('# '):
-            blocks.append({
-                "object": "block",
-                "type": "heading_1",
-                "heading_1": {
-                    "rich_text": parse_inline_markdown(line[2:].strip())
-                }
-            })
-        # H2 header
-        elif line.startswith('## '):
-            blocks.append({
-                "object": "block",
-                "type": "heading_2",
-                "heading_2": {
-                    "rich_text": parse_inline_markdown(line[3:].strip())
-                }
-            })
-        # H3 header
-        elif line.startswith('### '):
-            blocks.append({
-                "object": "block",
-                "type": "heading_3",
-                "heading_3": {
-                    "rich_text": parse_inline_markdown(line[4:].strip())
-                }
-            })
-        # Bullet point
-        elif line.strip().startswith('- ') or line.strip().startswith('* '):
-            text = line.strip()[2:]
-            blocks.append({
-                "object": "block",
-                "type": "bulleted_list_item",
-                "bulleted_list_item": {
-                    "rich_text": parse_inline_markdown(text)
-                }
-            })
-        # Regular paragraph
         else:
-            # Collect consecutive non-header, non-bullet, non-blockquote lines into one paragraph
-            paragraph_lines = [line]
-            while i + 1 < len(lines):
-                next_line = lines[i + 1]
-                if (next_line.strip() and
-                    not next_line.startswith('#') and
-                    not next_line.strip().startswith('- ') and
-                    not next_line.strip().startswith('* ') and
-                    not next_line.strip().startswith('>')):
-                    paragraph_lines.append(next_line)
-                    i += 1
-                else:
-                    break
-
-            full_text = ' '.join(paragraph_lines)
-            if full_text.strip():
-                blocks.append({
-                    "object": "block",
-                    "type": "paragraph",
-                    "paragraph": {
-                        "rich_text": parse_inline_markdown(full_text)
-                    }
-                })
-
-        i += 1
+            i += 1
 
     return blocks
-
-
-def parse_inline_markdown(text: str) -> list[dict]:
-    """
-    Parse inline markdown (bold, links) into Notion rich_text array.
-    """
-    import re
-    rich_text = []
-
-    # Pattern to match markdown links [text](url) and bold **text**
-    pattern = r'(\*\*[^*]+\*\*|\[[^\]]+\]\([^)]+\))'
-    parts = re.split(pattern, text)
-
-    for part in parts:
-        if not part:
-            continue
-
-        # Bold text
-        if part.startswith('**') and part.endswith('**'):
-            rich_text.append({
-                "type": "text",
-                "text": {"content": part[2:-2]},
-                "annotations": {"bold": True}
-            })
-        # Link
-        elif part.startswith('[') and '](' in part:
-            match = re.match(r'\[([^\]]+)\]\(([^)]+)\)', part)
-            if match:
-                link_text, url = match.groups()
-                rich_text.append({
-                    "type": "text",
-                    "text": {"content": link_text, "link": {"url": url}}
-                })
-        # Plain text
-        else:
-            rich_text.append({
-                "type": "text",
-                "text": {"content": part}
-            })
-
-    return rich_text if rich_text else [{"type": "text", "text": {"content": text}}]
 
 
 def create_summary_entry(
@@ -623,10 +672,31 @@ def create_summary_entry(
 
     Returns page ID.
     """
-    title = f"Monthly Summary - {month_name}"
+    title = f"Industry Trend Report - {month_name}"
+
+    # Build header block prepended to the page body
+    header_blocks = [
+        {
+            "object": "block",
+            "type": "heading_1",
+            "heading_1": {"rich_text": [{"type": "text", "text": {"content": title}}]}
+        },
+        {
+            "object": "block",
+            "type": "paragraph",
+            "paragraph": {"rich_text": [{"type": "text", "text": {
+                "content": f"{date.today().strftime('%B %Y')} · {article_count} articles analyzed"
+            }, "annotations": {"color": "gray"}}]}
+        },
+        {
+            "object": "block",
+            "type": "divider",
+            "divider": {}
+        },
+    ]
 
     # Convert markdown to Notion blocks
-    content_blocks = markdown_to_notion_blocks(summary_text)
+    content_blocks = header_blocks + markdown_to_notion_blocks(summary_text)
 
     properties = {
         "Title": {"title": [{"text": {"content": title}}]},
@@ -635,15 +705,25 @@ def create_summary_entry(
         "Summary": {"rich_text": [{"text": {"content": headline}}]},
     }
 
+    # Notion API caps children at 100 per request — create with first batch,
+    # then append remaining blocks in chunks.
+    BATCH_SIZE = 100
     response = notion.pages.create(
         parent={"database_id": NEWSLETTER_PIPELINE_DB},
         icon={"type": "emoji", "emoji": "📣"},
         properties=properties,
-        children=content_blocks
+        children=content_blocks[:BATCH_SIZE]
     )
+    page_id = response["id"]
 
-    logger.info(f"Created Monthly Summary entry: {title}")
-    return response["id"], response["url"]
+    for i in range(BATCH_SIZE, len(content_blocks), BATCH_SIZE):
+        notion.blocks.children.append(
+            block_id=page_id,
+            children=content_blocks[i:i + BATCH_SIZE]
+        )
+
+    logger.info(f"Created Industry Trend Report entry: {title}")
+    return page_id, response["url"]
 
 
 # ============================================================================
@@ -789,10 +869,8 @@ def main(days_back: int = None, dry_run: bool = False):
 
     # Initialize clients
     notion = get_notion_client()
-    anthropic_client = get_anthropic_client()
-
-    if not anthropic_client:
-        logger.error("Cannot proceed without Anthropic client")
+    if not check_anthropic_key():
+        logger.error("Cannot proceed without Anthropic API key")
         sys.exit(1)
 
     # Query recent articles and community discussions
@@ -831,9 +909,8 @@ def main(days_back: int = None, dry_run: bool = False):
         return
 
     # Generate summary with Claude
-    logger.info("Generating trend analysis with Claude Sonnet...")
+    logger.info("Generating trend analysis with Claude Opus (per-section)...")
     headline, summary = generate_monthly_summary(
-        anthropic_client,
         article_digest,
         period_description,
         len(articles)
