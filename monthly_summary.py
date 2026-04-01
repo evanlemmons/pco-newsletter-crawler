@@ -467,6 +467,44 @@ Examples:
 }
 
 
+def generate_section(
+    section_key: str,
+    digest: str,
+    period_description: str,
+    article_count: int,
+    model: str = "claude-opus-4-6",
+    previous_sections: str = "",
+    all_sections: str = "",
+) -> str:
+    """Generate a single newsletter section using a focused prompt."""
+    import anthropic
+    client = anthropic.Anthropic()
+
+    system_context = SECTION_SYSTEM_CONTEXT.format(
+        period_description=period_description,
+        article_count=article_count,
+        article_digest=digest,
+    )
+
+    section_prompt = SECTION_PROMPTS[section_key]
+    if section_key == "implications":
+        section_prompt = section_prompt.format(previous_sections=previous_sections)
+    elif section_key == "headline":
+        section_prompt = section_prompt.format(all_sections=all_sections)
+        # Headline doesn't need the article digest in system context
+        system_context = ""
+
+    full_prompt = f"{system_context}\n\n{section_prompt}" if system_context else section_prompt
+
+    message = client.messages.create(
+        model=model,
+        max_tokens=1500,
+        messages=[{"role": "user", "content": full_prompt}],
+    )
+
+    return message.content[0].text.strip()
+
+
 def generate_monthly_summary(
     anthropic_client,
     article_digest: str,
@@ -474,7 +512,7 @@ def generate_monthly_summary(
     article_count: int
 ) -> tuple[str, str]:
     """
-    Generate strategic trend analysis using Claude Sonnet.
+    Generate strategic trend analysis using Claude Opus (per-section calls).
 
     Returns tuple of (headline, body) where:
     - headline: Clickbait-style one-liner for the Summary property
