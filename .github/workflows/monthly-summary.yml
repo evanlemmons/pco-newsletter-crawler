@@ -48,9 +48,13 @@ jobs:
         env:
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          SLACK_WEBHOOK_URL: ${{ github.event.inputs.no_slack == 'true' && '' || secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: |
           CMD="python monthly_summary.py"
+
+          if [ "${{ github.event.inputs.no_slack }}" == "true" ]; then
+            unset SLACK_WEBHOOK_URL
+          fi
 
           if [ "${{ github.event.inputs.dry_run }}" == "true" ]; then
             CMD="$CMD --dry-run"
