@@ -396,7 +396,14 @@ Start with this exact format:
 
 > **TL;DR:** [2 sentences max — the 1-3 most important trend signals, including markdown links]
 
-Then write the detailed section. Use ### subheadings and - bullet points to organize the content. Use markdown links: [Title](url). Be selective and concise — quality over quantity. Do not use # or ## headers.""",
+Then write the detailed section using ### subheadings for each major trend. Under each ### subheading, lead with 1-2 sentences of prose context, then use - bullet points only if you have 3 or more parallel items to list. Aim for a natural mix — not all bullets, not all prose.
+
+Style rules:
+- Target 350-450 words for the full section
+- Use markdown links: [Title](url)
+- Bold ONLY statistics and key data points (e.g. **77%**, **$2.4M**) — not headers, not link text
+- Do NOT output --- horizontal rules
+- Do not use # or ## headers""",
 
     "events": """Write ONLY the ## 🏢 Major Industry Events section of the newsletter.
 
@@ -407,7 +414,15 @@ Start with this exact format:
 
 > **TL;DR:** [2 sentences max — the 1-2 most important events, including markdown links]
 
-Then write the detailed section. Use ### subheadings and - bullet points to organize the content. Use markdown links: [Title](url). If truly nothing noteworthy happened, write: "## 🏢 Major Industry Events\\n\\nNothing significant to report this month." Do not use # or ## headers.""",
+Then write the detailed section using ### subheadings for each event or theme. Under each ### subheading, lead with prose sentences — use - bullet points only if you have 3 or more parallel sub-points to list.
+
+Style rules:
+- Target 300-400 words for the full section
+- Use markdown links: [Title](url)
+- Bold ONLY statistics and key data points — not headers, not link text
+- Do NOT output --- horizontal rules
+- If truly nothing noteworthy happened, write only: "Nothing significant to report this month."
+- Do not use # or ## headers""",
 
     "sentiment": """Write ONLY the ## 💬 User Sentiment & Pain Points section of the newsletter.
 
@@ -418,7 +433,14 @@ Start with this exact format:
 
 > **TL;DR:** [2 sentences max — the 1-2 most actionable pain points, including markdown links]
 
-Then write the detailed section. Use ### subheadings and - bullet points to organize the content. Use markdown links: [Title](url). Do not use # or ## headers.""",
+Then write the detailed section using ### subheadings for each pain point or theme. Under each ### subheading, write 2-3 sentences of prose explaining the issue and why it matters — avoid converting everything into bullets. Use - bullet points only if listing 3+ concrete examples or symptoms.
+
+Style rules:
+- Target 300-400 words for the full section
+- Use markdown links: [Title](url)
+- Bold ONLY statistics and key data points — not headers, not link text
+- Do NOT output --- horizontal rules
+- Do not use # or ## headers""",
 
     "community": """Write ONLY the ## 💭 Community Discussions section of the newsletter.
 
@@ -433,11 +455,24 @@ Otherwise start with this exact format:
 
 > **TL;DR:** [2 sentences max — the 1-2 most important community signals, including markdown links to specific conversations]
 
-Then write the detailed section. Use ### subheadings for each major theme and - bullet points for sub-points. Cite conversation URLs inline as markdown links. Do not use # or ## headers.""",
+Write a brief intro paragraph (2-3 sentences) framing the overall community mood this month.
+
+Then use ### subheadings for each major theme, prefixed with a priority emoji:
+- 🔴 for high-priority pain points (multiple users, impacts core workflows)
+- 🟡 for medium-priority issues (notable but less urgent)
+- 🟢 for opportunities and positive signals
+
+Under each ### subheading, write 2-3 sentences of prose — cite conversation links inline. Use - bullet points only for listing 3+ concrete workarounds or examples.
+
+Style rules:
+- Target 350-450 words for the full section
+- Bold ONLY statistics and key data points — not headers, not link text
+- Do NOT output --- horizontal rules
+- Do not use # or ## headers""",
 
     "implications": """Write ONLY the ## 🎯 Strategic Implications section of the newsletter.
 
-You are given the other four sections of this month's newsletter as context. Your job is to synthesize them into actionable insights for the product team. What should we pay attention to? What opportunities or threats are emerging? Tie back to the most important findings from the other sections.
+You are given the other sections of this month's newsletter as context. Synthesize them into actionable insights for the product team. Be specific — tie back to named findings from the other sections.
 
 {previous_sections}
 
@@ -446,7 +481,13 @@ Start with this exact format:
 
 > **TL;DR:** [2 sentences max — the 2-3 most important strategic takeaways, including markdown links]
 
-Then write 3-5 bullet points (- ) that are specific and actionable. Do not use # or ## headers.""",
+Write 3-5 - bullet points. Each bullet should name the signal and state the implication for Planning Center in 2-3 sentences. Do not use ### subheadings.
+
+Style rules:
+- Target 200-300 words total
+- Bold ONLY statistics and key data points — not headers, not link text
+- Do NOT output --- horizontal rules
+- Do not use # or ## headers""",
 
     "headline": """Based on this month's newsletter sections below, write a single clickbait headline.
 
@@ -713,16 +754,28 @@ def parse_inline_markdown(text: str) -> list[dict]:
     import re
     rich_text = []
 
-    # Pattern to match markdown links [text](url) and bold **text**
-    pattern = r'(\*\*[^*]+\*\*|\[[^\]]+\]\([^)]+\))'
+    # Pattern to match: bold links **[text](url)**, plain links [text](url), bold **text**
+    # Bold links must come first — otherwise the bold pattern swallows the link syntax
+    pattern = r'(\*\*\[[^\]]+\]\([^)]+\)\*\*|\*\*[^*]+\*\*|\[[^\]]+\]\([^)]+\))'
     parts = re.split(pattern, text)
 
     for part in parts:
         if not part:
             continue
 
+        # Bold link: **[text](url)**
+        if part.startswith('**[') and part.endswith(')**'):
+            inner = part[2:-2]  # strip surrounding **
+            match = re.match(r'\[([^\]]+)\]\(([^)]+)\)', inner)
+            if match:
+                link_text, url = match.groups()
+                rich_text.append({
+                    "type": "text",
+                    "text": {"content": link_text, "link": {"url": url}},
+                    "annotations": {"bold": True}
+                })
         # Bold text
-        if part.startswith('**') and part.endswith('**'):
+        elif part.startswith('**') and part.endswith('**'):
             rich_text.append({
                 "type": "text",
                 "text": {"content": part[2:-2]},
