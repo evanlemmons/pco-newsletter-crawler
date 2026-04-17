@@ -407,11 +407,82 @@ def fetch_post_comments(post_id: int, debug: bool = False) -> list[dict]:
         return []
 
 
+def fetch_circle_events(since_date: datetime, debug: bool = False) -> dict:
+    """
+    Fetch community events from Circle API, grouped by space_id.
+    Includes events that started within the lookback window OR are upcoming within 30 days.
+    Returns dict mapping space_id -> list of event dicts.
+    """
+    headers = get_circle_headers()
+    events_by_space = defaultdict(list)
+    page = 1
+    now = datetime.now(timezone.utc)
+    upcoming_cutoff = now + timedelta(days=30)
+
+    try:
+        while True:
+            url = f"{CIRCLE_API_BASE}/events"
+            params = {"page": page, "per_page": 100}
+
+            if debug:
+                logger.info(f"  [DEBUG] Fetching events page {page}")
+
+            try:
+                data = make_circle_api_request(url, params, headers, debug=debug)
+                records = data.get("records", [])
+                if not records:
+                    break
+
+                for event in records:
+                    starts_at_str = event.get("starts_at", "")
+                    try:
+                        starts_at = datetime.fromisoformat(starts_at_str.replace('Z', '+00:00'))
+                    except (ValueError, TypeError):
+                        continue
+
+                    is_recent = since_date <= starts_at <= now
+                    is_upcoming = now < starts_at <= upcoming_cutoff
+
+                    if is_recent or is_upcoming:
+                        space_id = event.get("space", {}).get("id")
+                        if space_id:
+                            events_by_space[space_id].append({
+                                "id": event.get("id"),
+                                "name": event.get("name", ""),
+                                "body": event.get("body", ""),
+                                "url": event.get("url", ""),
+                                "starts_at": starts_at_str,
+                                "ends_at": event.get("ends_at", ""),
+                                "host": event.get("host", ""),
+                                "location_type": event.get("location_type", ""),
+                                "likes_count": event.get("likes_count", 0),
+                                "comments_count": event.get("comments_count", 0),
+                                "is_upcoming": is_upcoming and not is_recent,
+                            })
+
+                if not data.get("has_next_page", False):
+                    break
+
+                page += 1
+
+            except requests.exceptions.RequestException as e:
+                logger.warning(f"Failed to fetch events page {page}: {e}")
+                break
+
+        total = sum(len(v) for v in events_by_space.values())
+        logger.info(f"Fetched {total} relevant events across {len(events_by_space)} spaces")
+        return dict(events_by_space)
+
+    except Exception as e:
+        logger.warning(f"Error fetching Circle events (non-fatal): {e}")
+        return {}
+
+
 # ============================================================================
 # DATA AGGREGATION
 # ============================================================================
 
-def aggregate_space_content(space: dict, posts: list[dict], activity_since_date: datetime, debug: bool = False) -> dict:
+def aggregate_space_content(space: dict, posts: list[dict], activity_since_date: datetime, events: list[dict] = None, debug: bool = False) -> dict:
     """
     Aggregate posts and comments for a single space.
     Only includes posts/threads with activity since activity_since_date.
@@ -496,6 +567,25 @@ def aggregate_space_content(space: dict, posts: list[dict], activity_since_date:
                     comment_body = comment_body[:500] + "..."
                 digest_lines.append(f"- {comment['user_name']}: {comment_body}")
 
+    # Events section
+    if events:
+        digest_lines.append("\n## Community Events")
+        for event in events:
+            label = "UPCOMING" if event.get("is_upcoming") else "RECENT"
+            digest_lines.append(f"\n### [{label}] {event['name']}")
+            digest_lines.append(f"URL: {event['url']}")
+            digest_lines.append(f"Starts: {event['starts_at']}")
+            if event.get("host"):
+                digest_lines.append(f"Host: {event['host']}")
+            if event.get("location_type"):
+                digest_lines.append(f"Format: {event['location_type']}")
+            if event.get("body"):
+                body = event["body"]
+                if len(body) > 500:
+                    body = body[:500] + "... [truncated]"
+                digest_lines.append(f"Description: {body}")
+            digest_lines.append(f"Engagement: {event['likes_count']} likes, {event['comments_count']} comments")
+
     content_digest = "\n".join(digest_lines)
 
     return {
@@ -503,6 +593,7 @@ def aggregate_space_content(space: dict, posts: list[dict], activity_since_date:
         "space_slug": space["slug"],
         "post_count": len(posts),
         "comment_count": total_comments,
+        "event_count": len(events) if events else 0,
         "content_digest": content_digest,
         "posts_with_comments": posts_with_comments
     }
@@ -1015,10 +1106,15 @@ def main(days_back: int = DEFAULT_DAYS_BACK, dry_run: bool = False, debug: bool 
         )
         sys.exit(1)
 
+    # Fetch events globally (non-fatal if it fails)
+    logger.info("Fetching community events...")
+    events_by_space = fetch_circle_events(activity_since_date, debug=debug)
+
     if dry_run:
         logger.info("\n--- DRY RUN MODE ---")
         for space in spaces:
-            logger.info(f"Would analyze space: {space['name']} ({space['posts_count']} total posts)")
+            event_count = len(events_by_space.get(space["id"], []))
+            logger.info(f"Would analyze space: {space['name']} ({space['posts_count']} total posts, {event_count} events)")
         return
 
     # Analyze each space
@@ -1043,10 +1139,11 @@ def main(days_back: int = DEFAULT_DAYS_BACK, dry_run: bool = False, debug: bool 
             # Aggregate content and filter for recent activity (new posts or comments in past 7 days)
             logger.info(f"  Aggregating posts/comments and filtering for recent activity...")
             try:
-                space_data = aggregate_space_content(space, posts, activity_since_date, debug=debug)
-                logger.info(f"  Threads with recent activity: {space_data['post_count']} posts, {space_data['comment_count']} comments")
+                space_events = events_by_space.get(space["id"], [])
+                space_data = aggregate_space_content(space, posts, activity_since_date, events=space_events, debug=debug)
+                logger.info(f"  Threads with recent activity: {space_data['post_count']} posts, {space_data['comment_count']} comments, {space_data['event_count']} events")
 
-                if space_data['post_count'] == 0:
+                if space_data['post_count'] == 0 and space_data['event_count'] == 0:
                     logger.info(f"  Skipping space (no recent activity in past {days_back} days)")
                     continue
 
