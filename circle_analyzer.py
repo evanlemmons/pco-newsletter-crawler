@@ -407,6 +407,72 @@ def fetch_post_comments(post_id: int, debug: bool = False) -> list[dict]:
         return []
 
 
+def fetch_circle_events(since_date: datetime, debug: bool = False) -> dict:
+    """
+    Fetch community events from Circle API that occurred in the past 30 days.
+    Returns dict mapping space_id -> list of event dicts.
+    """
+    headers = get_circle_headers()
+    events_by_space = defaultdict(list)
+    page = 1
+    now = datetime.now(timezone.utc)
+    lookback = now - timedelta(days=30)
+
+    try:
+        while True:
+            url = f"{CIRCLE_API_BASE}/events"
+            params = {"page": page, "per_page": 100}
+
+            if debug:
+                logger.info(f"  [DEBUG] Fetching events page {page}")
+
+            try:
+                data = make_circle_api_request(url, params, headers, debug=debug)
+                records = data.get("records", [])
+                if not records:
+                    break
+
+                for event in records:
+                    starts_at_str = event.get("starts_at", "")
+                    try:
+                        starts_at = datetime.fromisoformat(starts_at_str.replace('Z', '+00:00'))
+                    except (ValueError, TypeError):
+                        continue
+
+                    if lookback <= starts_at <= now:
+                        space_id = event.get("space", {}).get("id")
+                        if space_id:
+                            events_by_space[space_id].append({
+                                "id": event.get("id"),
+                                "name": event.get("name", ""),
+                                "body": event.get("body", ""),
+                                "url": event.get("url", ""),
+                                "starts_at": starts_at_str,
+                                "ends_at": event.get("ends_at", ""),
+                                "host": event.get("host", ""),
+                                "location_type": event.get("location_type", ""),
+                                "likes_count": event.get("likes_count", 0),
+                                "comments_count": event.get("comments_count", 0),
+                            })
+
+                if not data.get("has_next_page", False):
+                    break
+
+                page += 1
+
+            except requests.exceptions.RequestException as e:
+                logger.warning(f"Failed to fetch events page {page}: {e}")
+                break
+
+        total = sum(len(v) for v in events_by_space.values())
+        logger.info(f"Fetched {total} relevant events across {len(events_by_space)} spaces")
+        return dict(events_by_space)
+
+    except Exception as e:
+        logger.warning(f"Error fetching Circle events (non-fatal): {e}")
+        return {}
+
+
 # ============================================================================
 # DATA AGGREGATION
 # ============================================================================
@@ -416,12 +482,6 @@ def aggregate_space_content(space: dict, posts: list[dict], activity_since_date:
     Aggregate posts and comments for a single space.
     Only includes posts/threads with activity since activity_since_date.
 
-    Args:
-        space: Space dict
-        posts: List of posts (may include older posts)
-        activity_since_date: Only include threads with post or comment activity since this date
-        debug: Enable debug logging
-
     Returns dict with: space_name, post_count, comment_count, content_digest
     """
     space_name = space["name"]
@@ -429,7 +489,6 @@ def aggregate_space_content(space: dict, posts: list[dict], activity_since_date:
     if debug:
         logger.info(f"  [DEBUG] Aggregating {len(posts)} posts for space '{space_name}'")
 
-    # Fetch comments for each post and filter for recent activity
     posts_with_comments = []
     total_comments = 0
     filtered_count = 0
@@ -437,11 +496,9 @@ def aggregate_space_content(space: dict, posts: list[dict], activity_since_date:
     for post in posts:
         comments = fetch_post_comments(post["id"], debug=debug)
 
-        # Check if post or any comment has recent activity
         post_created_at = datetime.fromisoformat(post["created_at"].replace('Z', '+00:00'))
         has_recent_post = post_created_at >= activity_since_date
 
-        # Check for recent comments
         has_recent_comment = False
         if comments:
             for comment in comments:
@@ -453,7 +510,6 @@ def aggregate_space_content(space: dict, posts: list[dict], activity_since_date:
                 except (ValueError, TypeError):
                     continue
 
-        # Only include if there's recent activity (post OR comment)
         if has_recent_post or has_recent_comment:
             posts_with_comments.append({
                 "post": post,
@@ -475,19 +531,16 @@ def aggregate_space_content(space: dict, posts: list[dict], activity_since_date:
         post = item["post"]
         comments = item["comments"]
 
-        # Post header
         digest_lines.append(f"\n## Post: {post['name']}")
         digest_lines.append(f"URL: {post['url']}")
         digest_lines.append(f"Created: {post['created_at']}")
         digest_lines.append(f"Likes: {post['likes_count']}, Comments: {post['comments_count']}")
 
-        # Post body (truncate if very long)
         body = post["body"]
         if len(body) > 2000:
             body = body[:2000] + "... [truncated]"
         digest_lines.append(f"\nContent:\n{body}")
 
-        # Comments
         if comments:
             digest_lines.append(f"\nComments ({len(comments)}):")
             for comment in comments:
@@ -914,6 +967,147 @@ def create_theme_entry(
     return response["id"]
 
 
+def create_events_entry(
+    notion: Client,
+    all_events: list[dict],
+    source_page_id: str,
+    days_back: int,
+    debug: bool = False
+) -> Optional[str]:
+    """
+    Create a single Newsletter Pipeline entry summarising all community events.
+    Returns page ID, or None if no events.
+    """
+    if not all_events:
+        return None
+
+    now = datetime.now(timezone.utc)
+    recent = sorted(all_events, key=lambda e: e["starts_at"], reverse=True)
+
+    title = f"Circle: Community Events — {now.strftime('%B %Y')}"
+
+    summary_parts = ["🕐 Recent Events (past 30 days)\n"]
+    for event in recent:
+        try:
+            dt = datetime.fromisoformat(event["starts_at"].replace("Z", "+00:00"))
+            date_str = dt.strftime("%b %-d, %Y")
+        except Exception:
+            date_str = event["starts_at"]
+        summary_parts.append(f"• {event['name']} — {date_str}")
+        if event.get("host"):
+            summary_parts.append(f"  Host: {event['host']}")
+        if event.get("url"):
+            summary_parts.append(f"  {event['url']}")
+        summary_parts.append("")
+
+    summary = "\n".join(summary_parts).strip()
+
+    properties = {
+        "Title": {"title": [{"text": {"content": title}}]},
+        "Type": {"select": {"name": "Community Discussion"}},
+        "Topic": {"multi_select": [{"name": "Event"}]},
+        "Date Found": {"date": {"start": date.today().isoformat()}},
+        "Summary": {"rich_text": build_rich_text(summary)},
+        "Source Page": {"relation": [{"id": source_page_id}]},
+    }
+
+    if recent and recent[0].get("url"):
+        properties["URL"] = {"url": recent[0]["url"]}
+
+    response = notion.pages.create(
+        parent={"database_id": NEWSLETTER_PIPELINE_DB},
+        icon={"type": "emoji", "emoji": "📅"},
+        properties=properties
+    )
+
+    if debug:
+        logger.info(f"  [DEBUG] Created events entry: {title}")
+
+    return response["id"]
+
+
+CROSS_SPACE_SYNTHESIS_PROMPT = """You are a senior product strategist analyzing community intelligence from Planning Center's Circle community.
+
+Below are themes identified independently across multiple community spaces over the past {days_back} days. Each theme was found in a specific space.
+
+Your task: Identify patterns that appear ACROSS multiple spaces — these cross-cutting themes are the strongest product signals because they represent broad customer pain, not isolated pockets.
+
+THEMES BY SPACE:
+{themes_by_space}
+
+INSTRUCTIONS:
+1. Look for themes that share underlying issues even if framed differently across spaces
+2. Only surface patterns that appear in 2+ spaces
+3. Assign priority: 🔴 Critical (3+ spaces or strong pain), 🟡 Notable (2 spaces, clear signal), 🟢 Watch (2 spaces, early signal)
+4. Be specific about which spaces the pattern appeared in
+
+If there are no meaningful cross-space patterns, respond with:
+NO_CROSS_SPACE_PATTERNS
+
+Otherwise, format your response as one or more synthesis blocks:
+
+---SYNTHESIS---
+### 🔴 [Priority] Cross-Space Theme Title
+Spaces: [Space A, Space B, ...]
+Pattern: [2-3 sentences describing the cross-cutting issue and why it matters]
+Evidence:
+- [Space A]: [how it showed up there]
+- [Space B]: [how it showed up there]
+Recommended Action: [1 specific recommendation for the product team]
+---END_SYNTHESIS---
+
+Quality over quantity. Only include patterns where the cross-space connection is genuinely meaningful."""
+
+
+def create_synthesis_entry(
+    notion: Client,
+    synthesis_text: str,
+    source_page_id: str,
+    spaces_analyzed: int,
+    debug: bool = False
+) -> Optional[str]:
+    """
+    Create a Newsletter Pipeline entry for cross-space synthesis.
+    Returns page ID, or None if no patterns found.
+    """
+    if "NO_CROSS_SPACE_PATTERNS" in synthesis_text:
+        return None
+
+    # Extract synthesis blocks
+    blocks = synthesis_text.split("---SYNTHESIS---")
+    patterns = [b.split("---END_SYNTHESIS---")[0].strip() for b in blocks[1:] if b.strip()]
+    if not patterns:
+        return None
+
+    title = f"Circle: Cross-Space Insights — {datetime.now().strftime('%B %Y')}"
+
+    summary_parts = [
+        f"Cross-cutting themes found across {spaces_analyzed} community spaces:\n\n",
+        "\n\n---\n\n".join(patterns)
+    ]
+    summary = "".join(summary_parts)
+
+    properties = {
+        "Title": {"title": [{"text": {"content": title}}]},
+        "Type": {"select": {"name": "Community Discussion"}},
+        "Topic": {"multi_select": [{"name": "Trend"}]},
+        "Date Found": {"date": {"start": date.today().isoformat()}},
+        "Summary": {"rich_text": build_rich_text(summary)},
+        "Source Page": {"relation": [{"id": source_page_id}]},
+    }
+
+    response = notion.pages.create(
+        parent={"database_id": NEWSLETTER_PIPELINE_DB},
+        icon={"type": "emoji", "emoji": "🔀"},
+        properties=properties
+    )
+
+    if debug:
+        logger.info(f"  [DEBUG] Created synthesis entry: {title}")
+
+    return response["id"]
+
+
 def update_source_status(
     notion: Client,
     page_id: str,
@@ -1015,10 +1209,18 @@ def main(days_back: int = DEFAULT_DAYS_BACK, dry_run: bool = False, debug: bool 
         )
         sys.exit(1)
 
+    # Fetch events globally (non-fatal if it fails)
+    logger.info("Fetching community events...")
+    events_by_space = fetch_circle_events(activity_since_date, debug=debug)
+
+    all_events = [e for evts in events_by_space.values() for e in evts]
+
     if dry_run:
         logger.info("\n--- DRY RUN MODE ---")
         for space in spaces:
             logger.info(f"Would analyze space: {space['name']} ({space['posts_count']} total posts)")
+        logger.info(f"Would create 1 events entry ({len(all_events)} events)")
+        logger.info("Would run cross-space synthesis if themes found across 2+ spaces")
         return
 
     # Analyze each space
@@ -1031,8 +1233,7 @@ def main(days_back: int = DEFAULT_DAYS_BACK, dry_run: bool = False, debug: bool 
         logger.info(f"\n[{i}/{len(spaces)}] Processing space: {space['name']}")
 
         try:
-            # Fetch posts (look back 60 days to catch threads with new comments)
-            logger.info(f"  Fetching posts from past 60 days (to catch threads with new activity)...")
+            logger.info(f"  Fetching posts from past 60 days...")
             posts = fetch_space_posts(space["id"], post_lookback_date, activity_since_date, debug=debug)
             logger.info(f"  Found {len(posts)} posts")
 
@@ -1040,7 +1241,6 @@ def main(days_back: int = DEFAULT_DAYS_BACK, dry_run: bool = False, debug: bool 
                 logger.info(f"  Skipping space (no posts in lookback window)")
                 continue
 
-            # Aggregate content and filter for recent activity (new posts or comments in past 7 days)
             logger.info(f"  Aggregating posts/comments and filtering for recent activity...")
             try:
                 space_data = aggregate_space_content(space, posts, activity_since_date, debug=debug)
@@ -1057,16 +1257,9 @@ def main(days_back: int = DEFAULT_DAYS_BACK, dry_run: bool = False, debug: bool 
                 spaces_with_errors.append((space['name'], f"Aggregation error: {str(e)[:100]}"))
                 continue
 
-            # AI analysis
             logger.info(f"  Analyzing with Claude Sonnet...")
             try:
-                themes = analyze_space_with_ai(
-                    anthropic_client,
-                    space_data,
-                    days_back,
-                    debug=debug
-                )
-
+                themes = analyze_space_with_ai(anthropic_client, space_data, days_back, debug=debug)
                 if themes:
                     all_themes.extend(themes)
                     for theme in themes:
@@ -1100,13 +1293,25 @@ def main(days_back: int = DEFAULT_DAYS_BACK, dry_run: bool = False, debug: bool 
         for space_name, error in spaces_with_errors:
             logger.warning(f"  • {space_name}: {error}")
 
+    entries_created = 0
+
+    # Create events entry (always, independent of themes)
+    if all_events:
+        logger.info(f"\nCreating events entry ({len(all_events)} events)...")
+        try:
+            create_events_entry(notion, all_events, circle_source["page_id"], days_back, debug=debug)
+            entries_created += 1
+            logger.info("  ✓ Created: Community Events entry")
+        except Exception as e:
+            logger.error(f"  ✗ Failed to create events entry: {e}")
+
     if not all_themes:
-        logger.info("No significant themes found. No entries will be created.")
+        logger.info("No significant themes found. No theme entries will be created.")
         update_source_status(
             notion,
             circle_source["page_id"],
             success=True,
-            themes_created=0,
+            themes_created=entries_created,
             spaces_analyzed=len(spaces),
             posts_analyzed=total_posts,
             duration=time.time() - start_time,
@@ -1119,38 +1324,72 @@ def main(days_back: int = DEFAULT_DAYS_BACK, dry_run: bool = False, debug: bool 
         logger.info(f"Limiting to top {MAX_THEMES_PER_RUN} themes")
         all_themes = all_themes[:MAX_THEMES_PER_RUN]
 
-    # Create Notion entries
-    logger.info(f"\nCreating {len(all_themes)} Newsletter Pipeline entries...")
-    themes_created = 0
-
+    # Create per-space theme entries
+    logger.info(f"\nCreating {len(all_themes)} theme entries...")
     for theme in all_themes:
         try:
-            create_theme_entry(
-                notion,
-                theme,
-                circle_source["page_id"],
-                debug=debug
-            )
-            themes_created += 1
+            create_theme_entry(notion, theme, circle_source["page_id"], debug=debug)
+            entries_created += 1
             logger.info(f"  ✓ Created: {theme['title']}")
         except Exception as e:
             logger.error(f"  ✗ Failed to create entry for '{theme['title']}': {e}")
             if debug:
                 logger.exception("Full traceback:")
 
+    # Cross-space synthesis (only if themes span multiple spaces)
+    spaces_with_themes = set(t.get("space_name") for t in all_themes if t.get("space_name"))
+    if len(spaces_with_themes) >= 2:
+        logger.info(f"\nRunning cross-space synthesis ({len(spaces_with_themes)} spaces with themes)...")
+        try:
+            themes_by_space_text = ""
+            by_space = defaultdict(list)
+            for t in all_themes:
+                by_space[t.get("space_name", "Unknown")].append(t)
+            for space_name, themes in by_space.items():
+                themes_by_space_text += f"\n### {space_name}\n"
+                for t in themes:
+                    themes_by_space_text += f"- **{t['title']}**: {t['description']}\n"
+
+            prompt = CROSS_SPACE_SYNTHESIS_PROMPT.format(
+                days_back=days_back,
+                themes_by_space=themes_by_space_text
+            )
+
+            synthesis_response = anthropic_client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=1500,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            synthesis_text = synthesis_response.content[0].text
+
+            page_id = create_synthesis_entry(
+                notion, synthesis_text, circle_source["page_id"], spaces_processed, debug=debug
+            )
+            if page_id:
+                entries_created += 1
+                logger.info("  ✓ Created: Cross-Space Insights entry")
+            else:
+                logger.info("  — No cross-space patterns found")
+        except Exception as e:
+            logger.error(f"  ✗ Cross-space synthesis failed: {e}")
+            if debug:
+                logger.exception("Full traceback:")
+    else:
+        logger.info(f"\nSkipping cross-space synthesis (themes found in only {len(spaces_with_themes)} space)")
+
     # Update source status
     update_source_status(
         notion,
         circle_source["page_id"],
         success=True,
-        themes_created=themes_created,
+        themes_created=entries_created,
         spaces_analyzed=len(spaces),
         posts_analyzed=total_posts,
         duration=time.time() - start_time,
         error=None
     )
 
-    logger.info(f"\n✓ Done! Created {themes_created} theme entries in Newsletter Pipeline")
+    logger.info(f"\n✓ Done! Created {entries_created} entries in Newsletter Pipeline")
     logger.info(f"Total duration: {time.time() - start_time:.1f}s")
 
 
