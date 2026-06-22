@@ -1,0 +1,47 @@
+name: Keepalive
+
+# Keeps this repo's scheduled workflows (Newsletter Crawler, Monthly Summary,
+# Circle Community Analyzer) from being auto-disabled.
+#
+# GitHub disables cron-triggered workflows after 60 days with no repository
+# activity. Those jobs write their output to Notion and never commit back, so
+# even successful daily/weekly runs do NOT count as activity. This job checks
+# how stale the repo is once a week and pushes an empty commit only when it is
+# approaching the limit, resetting the 60-day clock.
+
+on:
+  schedule:
+    - cron: '0 5 * * 0'   # Every Sunday 05:00 UTC
+  workflow_dispatch: {}    # Allow manual trigger from the Actions tab
+
+permissions:
+  contents: write
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # Need history to read the last commit date
+
+      - name: Push empty commit if the repo is going stale
+        run: |
+          last_commit_epoch=$(git log -1 --format=%ct)
+          now_epoch=$(date +%s)
+          days_since=$(( (now_epoch - last_commit_epoch) / 86400 ))
+          echo "Days since last commit: $days_since"
+
+          # GitHub disables scheduled workflows at 60 days. Refresh at 45 to
+          # leave a buffer for any skipped/delayed scheduled runs.
+          if [ "$days_since" -lt 45 ]; then
+            echo "Repo active within 45 days; no keepalive commit needed."
+            exit 0
+          fi
+
+          echo "Approaching the 60-day inactivity limit; pushing keepalive commit."
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit --allow-empty -m "chore: keepalive to keep scheduled workflows enabled"
+          git push
